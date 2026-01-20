@@ -700,8 +700,10 @@ class TransFusionHead(nn.Module):
         voxel_size = torch.tensor(self.train_cfg['voxel_size'])
         feature_map_size = (grid_size[:2] // self.train_cfg['out_size_factor']
                             )  # [x_len, y_len]
-        heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
-                                         feature_map_size[0])
+        # heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
+        #                                  feature_map_size[0])
+        heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[0],
+                                         feature_map_size[1])
         for idx in range(len(gt_bboxes_3d)):
             width = gt_bboxes_3d[idx][3]
             length = gt_bboxes_3d[idx][4]

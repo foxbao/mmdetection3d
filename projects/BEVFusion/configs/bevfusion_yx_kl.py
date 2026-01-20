@@ -7,25 +7,34 @@ custom_imports = dict(
 # Usually voxel size is changed consistently with the point cloud range
 # If point cloud range is modified, do remember to change all related
 # keys in the config.
-voxel_size = [0.075, 0.075, 0.2]
-point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+voxel_size = [0.1, 0.1, 0.2]
+point_cloud_range = [-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]
+
 class_names = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+    "Pedestrian", 
+    "Car", 
+    "IGV-Full", 
+    "Truck", 
+    "Trailer-Empty", 
+    "Trailer-Full", 
+    "IGV-Empty", 
+    "Crane", 
+    "OtherVehicle", 
+    "Cone", 
+    "ContainerForklift", 
+    "Forklift", 
+    "Lorry", 
+    "ConstructionVehicle", 
+    "WheelCrane"
 ]
 
 metainfo = dict(classes=class_names)
-dataset_type = 'NuScenesDataset'
-data_root = 'data/nuscenes/'
+dataset_type = 'KlDataset'
+data_root = 'data/kl_8/'
 data_prefix = dict(
-    pts='samples/LIDAR_TOP',
-    CAM_FRONT='samples/CAM_FRONT',
-    CAM_FRONT_LEFT='samples/CAM_FRONT_LEFT',
-    CAM_FRONT_RIGHT='samples/CAM_FRONT_RIGHT',
-    CAM_BACK='samples/CAM_BACK',
-    CAM_BACK_RIGHT='samples/CAM_BACK_RIGHT',
-    CAM_BACK_LEFT='samples/CAM_BACK_LEFT',
-    sweeps='sweeps/LIDAR_TOP')
+    pts='v1.0-trainval/samples',
+    img='v1.0-trainval/sample',
+    sweeps='v1.0-trainval/samples')
 input_modality = dict(use_lidar=True, use_camera=False)
 # backend_args = dict(
 #     backend='petrel',
@@ -48,15 +57,15 @@ model = dict(
         pad_size_divisor=32,
         voxelize_cfg=dict(
             max_num_points=10,
-            point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0],
-            voxel_size=[0.075, 0.075, 0.2],
+            point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0],
+            voxel_size=[0.1, 0.1, 0.2],
             max_voxels=[120000, 160000],
             voxelize_reduce=True)),
     pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=5),
     pts_middle_encoder=dict(
         type='BEVFusionSparseEncoder',
-        in_channels=5,
-        sparse_shape=[1440, 1440, 41],
+        in_channels=4,
+        sparse_shape=[960, 1600, 41],
         order=('conv', 'norm', 'act'),
         norm_cfg=dict(type='BN1d', eps=0.001, momentum=0.01),
         encoder_channels=((16, 16, 32), (32, 32, 64), (64, 64, 128), (128,
@@ -85,7 +94,7 @@ model = dict(
         auxiliary=True,
         in_channels=512,
         hidden_channel=128,
-        num_classes=10,
+        num_classes=15,
         nms_kernel_size=3,
         bn_momentum=0.1,
         num_decoder_layers=1,
@@ -104,9 +113,9 @@ model = dict(
             pos_encoding_cfg=dict(input_channel=2, num_pos_feats=128)),
         train_cfg=dict(
             dataset='nuScenes',
-            point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0],
-            grid_size=[1440, 1440, 41],
-            voxel_size=[0.075, 0.075, 0.2],
+            point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0],
+            grid_size=[960, 1600, 41],
+            voxel_size=[0.1, 0.1, 0.2],
             out_size_factor=8,
             gaussian_overlap=0.1,
             min_radius=2,
@@ -124,20 +133,20 @@ model = dict(
                 iou_cost=dict(type='IoU3DCost', weight=0.25))),
         test_cfg=dict(
             dataset='nuScenes',
-            grid_size=[1440, 1440, 41],
+            grid_size=[960, 1600, 41],
             out_size_factor=8,
-            voxel_size=[0.075, 0.075],
-            pc_range=[-54.0, -54.0],
+            voxel_size=[0.1, 0.1],
+            pc_range=[-48.0, -80.0],
             nms_type=None),
         common_heads=dict(
             center=[2, 2], height=[1, 2], dim=[3, 2], rot=[2, 2], vel=[2, 2]),
         bbox_coder=dict(
             type='TransFusionBBoxCoder',
-            pc_range=[-54.0, -54.0],
-            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            pc_range=[-48.0, -80.0],
+            post_center_range=[-48.0, -80.0, -10.0, 48.0, 80.0, 10.0],
             score_threshold=0.0,
             out_size_factor=8,
-            voxel_size=[0.075, 0.075],
+            voxel_size=[0.1, 0.1],
             code_size=10),
         loss_cls=dict(
             type='mmdet.FocalLoss',
@@ -153,38 +162,50 @@ model = dict(
 
 db_sampler = dict(
     data_root=data_root,
-    info_path=data_root + 'nuscenes_dbinfos_train.pkl',
+    info_path=data_root + 'kl_dbinfos_train.pkl',
     rate=1.0,
     prepare=dict(
         filter_by_difficulty=[-1],
-        filter_by_min_points=dict(
-            car=5,
-            truck=5,
-            bus=5,
-            trailer=5,
-            construction_vehicle=5,
-            traffic_cone=5,
-            barrier=5,
-            motorcycle=5,
-            bicycle=5,
-            pedestrian=5)),
+        filter_by_min_points={
+            "Pedestrian": 10,
+            "Car": 50,
+            "IGV-Full": 50,
+            "Truck": 50,
+            "Trailer-Empty": 50,
+            "Trailer-Full": 50,
+            "IGV-Empty": 50,
+            "Crane": 50,
+            "OtherVehicle": 50,
+            "Cone": 10,
+            "ContainerForklift": 50,
+            "Forklift": 50,
+            "Lorry": 50,
+            "ConstructionVehicle": 50,
+            "WheelCrane": 100
+        }),
     classes=class_names,
-    sample_groups=dict(
-        car=2,
-        truck=3,
-        construction_vehicle=7,
-        bus=4,
-        trailer=6,
-        barrier=2,
-        motorcycle=6,
-        bicycle=6,
-        pedestrian=2,
-        traffic_cone=2),
+    sample_groups={
+            "Pedestrian": 5,
+            "Car": 5,
+            "IGV-Full": 5,
+            "Truck": 5,
+            "Trailer-Empty": 5,
+            "Trailer-Full": 5,
+            "IGV-Empty": 5,
+            "Crane": 5,
+            "OtherVehicle": 0,
+            "Cone": 5,
+            "ContainerForklift": 5,
+            "Forklift": 1,
+            "Lorry": 1,
+            "ConstructionVehicle": 5,
+            "WheelCrane": 1
+        },
     points_loader=dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=[0, 1, 2, 3, 4],
+        use_dim=[0, 1, 2, 3],
         backend_args=backend_args))
 
 train_pipeline = [
@@ -192,16 +213,9 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
+        use_dim=4,
         backend_args=backend_args),
-    dict(
-        type='LoadPointsFromMultiSweeps',
-        sweeps_num=9,
-        load_dim=5,
-        use_dim=5,
-        pad_empty_sweeps=True,
-        remove_close=True,
-        backend_args=backend_args),
+
     dict(
         type='LoadAnnotations3D',
         with_bbox_3d=True,
@@ -219,8 +233,21 @@ train_pipeline = [
     dict(
         type='ObjectNameFilter',
         classes=[
-            'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
-            'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+            "Pedestrian", 
+            "Car", 
+            "IGV-Full", 
+            "Truck", 
+            "Trailer-Empty", 
+            "Trailer-Full", 
+            "IGV-Empty", 
+            "Crane", 
+            "OtherVehicle", 
+            "Cone", 
+            "ContainerForklift", 
+            "Forklift", 
+            "Lorry", 
+            "ConstructionVehicle", 
+            "WheelCrane"
         ]),
     dict(type='PointShuffle'),
     dict(
@@ -243,19 +270,11 @@ test_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
-        backend_args=backend_args),
-    dict(
-        type='LoadPointsFromMultiSweeps',
-        sweeps_num=9,
-        load_dim=5,
-        use_dim=5,
-        pad_empty_sweeps=True,
-        remove_close=True,
+        use_dim=4,
         backend_args=backend_args),
     dict(
         type='PointsRangeFilter',
-        point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]),
+        point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]),
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],
@@ -267,7 +286,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=6,
+    batch_size=4,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -276,7 +295,7 @@ train_dataloader = dict(
         dataset=dict(
             type=dataset_type,
             data_root=data_root,
-            ann_file='nuscenes_infos_train.pkl',
+            ann_file='kl_infos_train.pkl',
             pipeline=train_pipeline,
             metainfo=metainfo,
             modality=input_modality,
@@ -295,7 +314,7 @@ val_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='nuscenes_infos_val.pkl',
+        ann_file='kl_infos_val.pkl',
         pipeline=test_pipeline,
         metainfo=metainfo,
         modality=input_modality,
@@ -306,14 +325,15 @@ val_dataloader = dict(
 test_dataloader = val_dataloader
 
 val_evaluator = dict(
-    type='NuScenesMetric',
+    # type='NuScenesMetric',
+    type='KlMetric',
     data_root=data_root,
-    ann_file=data_root + 'nuscenes_infos_val.pkl',
+    ann_file=data_root + 'kl_infos_val.pkl',
     metric='bbox',
     backend_args=backend_args)
 test_evaluator = val_evaluator
 
-vis_backends = [dict(type='LocalVisBackend')]
+vis_backends = [dict(type='LocalVisBackend'), dict(type='TensorboardVisBackend')]
 visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 
@@ -362,7 +382,7 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=100)
 val_cfg = dict()
 test_cfg = dict()
 
@@ -375,10 +395,10 @@ optim_wrapper = dict(
 #   - `enable` means enable scaling LR automatically
 #       or not by default.
 #   - `base_batch_size` = (8 GPUs) x (4 samples per GPU).
-auto_scale_lr = dict(enable=False, base_batch_size=32)
+auto_scale_lr = dict(enable=False, base_batch_size=28)
 log_processor = dict(window_size=50)
 
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
-    checkpoint=dict(type='CheckpointHook', interval=5))
+    checkpoint=dict(type='CheckpointHook', interval=1))
 custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=15)]

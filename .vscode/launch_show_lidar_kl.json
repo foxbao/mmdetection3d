@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BEVFusion Test (Single GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/infer.py",
+      "args": [
+        "--config","projects/BEVFusion/configs/bevfusion_yx_kl.py",
+        "--checkpoint","work_dirs/bevfusion_yx_kl/epoch_20.pth",
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

@@ -1,10 +1,12 @@
 _base_ = [
-    './bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py'
+    './bevfusion_yx_kl.py'
 ]
-point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+# point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+point_cloud_range = [-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]
 input_modality = dict(use_lidar=True, use_camera=True)
 backend_args = None
 
+data_root = 'data/kl_8/'
 model = dict(
     type='BEVFusion',
     data_preprocessor=dict(
@@ -46,10 +48,15 @@ model = dict(
         type='DepthLSSTransform',
         in_channels=256,
         out_channels=80,
-        image_size=[256, 704],
-        feature_size=[32, 88],
-        xbound=[-54.0, 54.0, 0.3],
-        ybound=[-54.0, 54.0, 0.3],
+        # image_size=[256, 704],
+        # feature_size=[32, 88],
+        image_size=[512, 640],
+        feature_size=[64, 80],
+        # xbound=[-54.0, 54.0, 0.3],
+        # ybound=[-54.0, 54.0, 0.3],
+        # zbound=[-10.0, 10.0, 20.0],
+        xbound=[-48.0, 48.0, 0.4],
+        ybound=[-80.0, 80.0, 0.4],
         zbound=[-10.0, 10.0, 20.0],
         dbound=[1.0, 60.0, 0.5],
         downsample=2),
@@ -66,16 +73,16 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
+        use_dim=4,
         backend_args=backend_args),
-    dict(
-        type='LoadPointsFromMultiSweeps',
-        sweeps_num=9,
-        load_dim=5,
-        use_dim=5,
-        pad_empty_sweeps=True,
-        remove_close=True,
-        backend_args=backend_args),
+    # dict(
+    #     type='LoadPointsFromMultiSweeps',
+    #     sweeps_num=9,
+    #     load_dim=5,
+    #     use_dim=5,
+    #     pad_empty_sweeps=True,
+    #     remove_close=True,
+    #     backend_args=backend_args),
     dict(
         type='LoadAnnotations3D',
         with_bbox_3d=True,
@@ -83,7 +90,8 @@ train_pipeline = [
         with_attr_label=False),
     dict(
         type='ImageAug3D',
-        final_dim=[256, 704],
+        # final_dim=[256, 704],
+        final_dim=[512, 640],
         resize_lim=[0.38, 0.55],
         bot_pct_lim=[0.0, 0.0],
         rot_lim=[-5.4, 5.4],
@@ -141,19 +149,20 @@ test_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
+        use_dim=4,
         backend_args=backend_args),
-    dict(
-        type='LoadPointsFromMultiSweeps',
-        sweeps_num=9,
-        load_dim=5,
-        use_dim=5,
-        pad_empty_sweeps=True,
-        remove_close=True,
-        backend_args=backend_args),
+    # dict(
+    #     type='LoadPointsFromMultiSweeps',
+    #     sweeps_num=9,
+    #     load_dim=5,
+    #     use_dim=5,
+    #     pad_empty_sweeps=True,
+    #     remove_close=True,
+    #     backend_args=backend_args),
     dict(
         type='ImageAug3D',
-        final_dim=[256, 704],
+        # final_dim=[256, 704],
+        final_dim=[512, 640],
         resize_lim=[0.48, 0.48],
         bot_pct_lim=[0.0, 0.0],
         rot_lim=[0.0, 0.0],
@@ -161,7 +170,8 @@ test_pipeline = [
         is_train=False),
     dict(
         type='PointsRangeFilter',
-        point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]),
+        # point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]),
+        point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]),
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],
@@ -215,7 +225,7 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=1)
+train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=100)
 val_cfg = dict()
 test_cfg = dict()
 
