@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "create_data_kl",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/create_data.py",
+      "args": [
+        "kl",
+        "--root-path", "./data/kl_8",
+        "--out-dir", "./data/kl_8",
+        "--extra-tag", "kl",
+        "--version", "v1.0-mini",
+        "--max-sweeps", "1",
+        "--cfg", "projects/BEVFusion/configs/kl_8.py"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

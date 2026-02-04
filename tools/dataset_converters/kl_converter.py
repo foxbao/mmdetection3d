@@ -14,6 +14,10 @@ from pyquaternion import Quaternion
 from numba import njit, prange
 import mmengine
 import cv2
+import torch
+
+from tools.utils.visualize_tools import validate_img_box
+from mmdet3d.structures import LiDARInstance3DBoxes
 
 
 getcontext().prec = 30
@@ -72,7 +76,7 @@ def read_pcd_with_intensity(pcd_path):
     # print(fields)
     dtype = np.dtype([(f, get_numpy_dtype(t,s)) for f,t,s in zip(fields,type_,size)])
     data_offset = len('\n'.join(header)) + 1
-    # ... 前面读取 data 的代码不变 ...
+    # ... 前面读取 data 的代码不变 ...validate_img_box
     data = np.fromfile(pcd_path, dtype=dtype, offset=data_offset)
 
     # 定义我们想要的字段
@@ -152,124 +156,6 @@ def get_class_name_from_type(anno_data):
             print("[Warning] Unknown category:", obj['label'], obj['subtype'])
     return names
 
-# # ------------------- 帧处理 -------------------
-# def process_frame(frame_info):
-#     frame_id = float(frame_info['frame_stem'])
-#     merged_file = frame_info['save_path']/f"{frame_info['frame_stem']}.bin"
-#     if not merged_file.exists():
-#         merged_points = []
-
-#         for lidar_name in frame_info['used_lidars']:
-#             ts_array = frame_info['lidar_sorted_ts'][lidar_name]
-#             nearest_idx = find_nearest_ts_index(ts_array, frame_id)
-#             nearest_ts = ts_array[nearest_idx]
-#             if abs(nearest_ts-frame_id)>frame_info['max_diff']:
-#                 return {}
-#             lidar_file = frame_info['lidar_file_index'][lidar_name][nearest_ts]
-#             if not lidar_file.exists(): return {}
-#             points = read_pc(lidar_file)
-#             T = get_transform_matrix(frame_info['extrinsics_dict'][lidar_name])
-#             points_trans = transform_points_numba(points, T[:3,:3], T[:3,3])
-#             if frame_info['coord_transform']:
-#                 points_transformed = np.empty_like(points_trans)
-#                 points_transformed[:, 0] = -points_trans[:, 1]  # x: 左->右
-#                 points_transformed[:, 1] = points_trans[:, 0]   # y: 前->前
-#                 points_transformed[:, 2] = points_trans[:, 2]   # z保持不变
-#                 points_transformed[:, 3:] = points_trans[:, 3:]
-#                 merged_points.append(points_transformed)
-#             else:
-#                 merged_points.append(points_trans)
-
-#         if not merged_points: return {}
-#         merged_points = np.vstack(merged_points).astype(np.float32)
-
-#         mask = ~np.isnan(merged_points).any(axis=1)
-
-#         merged_points = merged_points[mask]
-        
-        
-#         merged_points.tofile(merged_file)
-
-#     info = {
-#         'lidar_path': str(merged_file),
-#         'num_features':4,
-#         'token':generate_token(),
-#         'sweeps':[],
-#         'cams':{},
-#         'lidar2ego_translation':[0,0,0],
-#         'lidar2ego_rotation':[1,0,0,0],
-#         'ego2global_translation':[0,0,0],
-#         'ego2global_rotation':[1,0,0,0],
-#         'timestamp':frame_id,
-#     }
-
-#     # ------------------- 相机信息 -------------------
-#     camera_types = [
-#         'CAM_FRONT','CAM_FRONT_RIGHT','CAM_FRONT_LEFT',
-#         'CAM_BACK','CAM_BACK_LEFT','CAM_BACK_RIGHT'
-#     ]
-#     for cam in camera_types:
-#         cam_token = generate_token()
-#         cam_info = {
-#             'data_path': '',
-#             'type': cam,
-#             'sample_data_token': cam_token,
-#             'sensor2ego_translation': [0,0,0],
-#             'sensor2ego_rotation': [1,0,0,0],
-#             'ego2global_translation': [0,0,0],
-#             'ego2global_rotation': [1,0,0,0],
-#             'timestamp': frame_id,
-#             'sensor2lidar_rotation': np.ones((3,3)),
-#             'sensor2lidar_translation': np.array([0,0,0]),
-#             'cam_intrinsic': np.zeros((3,3))
-#         }
-#         info['cams'][cam] = cam_info
-
-#     # ------------------- 标注信息 -------------------
-#     nearest_idx = find_nearest_ts_index(frame_info['label_ts_list'], frame_id)
-#     nearest_ts = frame_info['label_ts_list'][nearest_idx]
-#     if abs(nearest_ts-frame_id)>frame_info['max_diff']: return {}
-#     label_path = frame_info['label_file_list'][nearest_idx]
-#     if not label_path.exists(): return {}
-
-#     with open(label_path,'r',encoding='utf-8') as f:
-#         anno_data = json.load(f)
-#         if not anno_data: return {}
-#         locs = np.array([s['xyz'] for s in anno_data]).reshape(-1,3)
-#         dims = np.array([s['lwh'] for s in anno_data]).reshape(-1,3)
-#         rots = np.array([s['rotation']['z'] for s in anno_data]).reshape(-1,1)
-#         velocity = np.zeros((len(anno_data),2),dtype=np.float32)
-#         valid_flag = np.array([s['num_lidar_pts']>0 for s in anno_data],dtype=bool)
-#         names = np.array(get_class_name_from_type(anno_data))
-#         gt_boxes = np.concatenate([locs,dims,rots],axis=1)
-#         if frame_info['coord_transform']:
-#             # x: 左->右
-#             gt_boxes[:,0] = -locs[:,1]
-#             # y: 前->前
-#             gt_boxes[:,1] = locs[:,0]
-#             # z保持不变
-#             gt_boxes[:,2] = locs[:,2]
-
-#             # gt_boxes[:,3] = dims[:,1]  # l
-#             # gt_boxes[:,4] = dims[:,0]  # w
-#             # gt_boxes[:,5] = dims[:,2]  # h
-#             # yaw角度
-#             gt_boxes[:, 6] = rots[:, 0] + np.pi / 2
-#             # 归一化到 [-pi, pi]
-#             gt_boxes[:, 6] = (gt_boxes[:, 6] + np.pi) % (2 * np.pi) - np.pi
-
-#         info.update({
-#             'gt_boxes':gt_boxes,
-#             'gt_names':names,
-#             'gt_velocity':velocity,
-#             'num_lidar_pts':[s['num_lidar_pts'] for s in anno_data],
-#             'num_radar_pts':[0]*len(anno_data),
-#             'valid_flag':valid_flag.tolist()
-#         })
-
-#     return info
-
-
 def get_undist_image_path(img_path: Path):
     """
     把 .../camera/xxx_image/xxx.jpg
@@ -311,6 +197,8 @@ def merge_lidar_points(frame_info, frame_id, merged_file):
         T = get_transform_matrix(frame_info['extrinsics_dict'][lidar_name])
         points_trans = transform_points_numba(points, T[:3, :3], T[:3, 3])
 
+        # 我们的坐标系本身是x朝前，y朝左，z朝上，nus坐标系是x朝右，y朝前，z朝上，所以沿着z轴旋转90度
+        # 所以新的坐标点，x=-y，y=x，z=z
         if frame_info['coord_transform']:
             pts = np.empty_like(points_trans)
             pts[:, 0] = -points_trans[:, 1]
@@ -329,6 +217,15 @@ def merge_lidar_points(frame_info, frame_id, merged_file):
     merged_points.tofile(merged_file)
 
     return True
+
+def make_yaw_rotation(yaw_deg):
+    yaw = np.deg2rad(yaw_deg)
+    R = np.array([
+        [ np.cos(yaw), -np.sin(yaw), 0],
+        [ np.sin(yaw),  np.cos(yaw), 0],
+        [ 0,            0,           1]
+    ])
+    return R
 
 def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
     CAM_NAME_MAP = {
@@ -401,7 +298,7 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
             undist_img = cv2.remap(
                 img, map1, map2,
                 interpolation=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT
+                # borderMode=cv2.BORDER_CONSTANT
             )
 
             # ---------- 3️⃣ resize ----------
@@ -419,7 +316,49 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
         K_resized[1, 1] *= scale
         K_resized[0, 2] *= scale
         K_resized[1, 2] *= scale
+        
+        # ---------------------------------------------
+        # 1. 原始外参说明
+        # ---------------------------------------------
+        # 原始 extrinsic 是 camera -> 原始 LiDAR 的变换
+        # 即：
+        #   p_lidar_orig = extrinsic_cam_to_lidar_orig @ p_cam
+        # 其中 extrinsic_cam_to_lidar_orig 为 4x4 齐次变换矩阵
+        extrinsic_cam_to_lidar_orig = get_transform_matrix(
+            frame_info['camera_extrinsics_dict'][cam_name]
+        )  # shape: (4, 4)
+        
+        # ---------------------------------------------
+        # 2. 坐标系差异说明
+        # ---------------------------------------------
+        # 原 LiDAR 坐标系: x->前, y->左, z->上
+        # nuScenes 坐标系: x->右, y->前, z->上
+        # 因此需要绕 Z 轴旋转 90° 来对齐
+        T_lidar_orig_to_nus = np.eye(4)
+        T_lidar_orig_to_nus[:3, :3] = make_yaw_rotation(90)
 
+        # ---------------------------------------------
+        # 3. 数学关系推导（重点，保留原推导）
+        # ---------------------------------------------
+        # 点云在两个 LiDAR 坐标系之间的关系：
+        #   p_lidar_nus = T_lidar_orig_to_nus * p_lidar_orig
+        #   p_lidar_orig  = T_lidar_orig_to_nus⁻¹ * p_lidar_nus
+        #
+        # 原始相机到 LiDAR 的关系：
+        #   p_lidar_orig = extrinsic_cam_to_lidar_orig * p_cam
+        #
+        # 代入得到：
+        #   p_lidar_nus = (T_lidar_orig_to_nus @ extrinsic_cam_to_lidar_orig) @ p_cam
+        #
+        # 因此修正后的相机到 LiDAR（nuScenes）外参为：
+        #   extrinsic_cam_to_lidar_nus = T_lidar_orig_to_nus @ extrinsic_cam_to_lidar_orig
+        #
+        # 这就是为什么要对 extrinsic 做“左乘”旋转修正
+
+        # ---------------------------------------------
+        # 4. 左乘修正外参（非常关键）
+        # ---------------------------------------------
+        extrinsic_cam_to_lidar_nus = T_lidar_orig_to_nus @ extrinsic_cam_to_lidar_orig
         # ---------- cam_info ----------
         cam_info = {
             'data_path': str(undist_img_path),
@@ -427,21 +366,13 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
             'sample_data_token': generate_token(),
             'timestamp': float(nearest_ts),
 
-            'sensor2ego_translation': [0, 0, 0],
-            'sensor2ego_rotation': [1, 0, 0, 0],
-            'ego2global_translation': [0, 0, 0],
-            'ego2global_rotation': [1, 0, 0, 0],
+            'sensor2ego_translation': np.zeros(3, dtype=np.float32),
+            'sensor2ego_rotation': np.array([1, 0, 0, 0], dtype=np.float32),
+            'ego2global_translation': np.zeros(3, dtype=np.float32),
+            'ego2global_rotation': np.array([1, 0, 0, 0], dtype=np.float32),
 
-            'sensor2lidar_rotation': np.array(
-                get_transform_matrix(
-                    frame_info['camera_extrinsics_dict'][cam_name]
-                )[:3, :3]
-            ),
-            'sensor2lidar_translation': np.array(
-                get_transform_matrix(
-                    frame_info['camera_extrinsics_dict'][cam_name]
-                )[:3, 3]
-            ),
+            'sensor2lidar_rotation': extrinsic_cam_to_lidar_nus[:3, :3].astype(np.float32),
+            'sensor2lidar_translation': extrinsic_cam_to_lidar_nus[:3, 3].astype(np.float32),
 
             'cam_intrinsic': K_resized.astype(np.float32),
             'image_shape': (target_h, target_w),
@@ -452,13 +383,118 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
 
     return cams
 
-def process_gt_annotations(frame_info, frame_id):
+def recompute_num_lidar_pts_fast(
+    gt_boxes,
+    lidar_path,
+    device='cpu',
+    origin=(0.5, 0.5, 0.5)
+):
+    """
+    Args:
+        gt_boxes (np.ndarray): (M, 7) [x,y,z,dx,dy,dz,yaw]
+        lidar_path (str or Path): merged lidar bin
+    Returns:
+        num_lidar_pts (np.ndarray): (M,)
+    """
+    M = len(gt_boxes)
+    if M == 0:
+        return np.zeros((0,), dtype=np.int32)
+
+    # ---------- load points ----------
+    points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+    points_xyz = points[:, :3]
+
+    pts = torch.from_numpy(points_xyz).float()
+    boxes = torch.from_numpy(gt_boxes[:, :7]).float()
+
+    if device == 'cuda':
+        pts = pts.cuda(non_blocking=True)
+        boxes = boxes.cuda(non_blocking=True)
+
+    boxes3d = LiDARInstance3DBoxes(
+        boxes,
+        box_dim=7,
+        origin=origin
+    )
+
+    # ---------- NEW API ----------
+    # (N,) int tensor, value in [-1, M-1]
+    point_box_ids = boxes3d.points_in_boxes_part(pts)
+
+    # ---------- count ----------
+    num_lidar_pts = np.zeros((M,), dtype=np.int32)
+    ids = point_box_ids.cpu().numpy()
+
+    valid = ids >= 0
+    box_ids, counts = np.unique(ids[valid], return_counts=True)
+    num_lidar_pts[box_ids] = counts
+
+    return num_lidar_pts
+
+def recompute_num_lidar_pts_numpy(
+    gt_boxes: np.ndarray,
+    lidar_path,
+):
+    """
+    纯 NumPy 版本 points-in-box
+    多进程安全（无 torch）
+
+    Args:
+        gt_boxes: (N, 7) [x, y, z, dx, dy, dz, yaw]
+        lidar_path: .bin path (Nx4 float32)
+
+    Returns:
+        num_lidar_pts: (N,) int32
+    """
+    num_boxes = gt_boxes.shape[0]
+    if num_boxes == 0:
+        return np.zeros((0,), dtype=np.int32)
+
+    # ---------- load lidar ----------
+    points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+    pts = points[:, :3]  # (M, 3)
+
+    num_lidar_pts = np.zeros((num_boxes,), dtype=np.int32)
+
+    # ---------- per box ----------
+    for i in range(num_boxes):
+        cx, cy, cz, dx, dy, dz, yaw = gt_boxes[i]
+
+        # 1. 平移
+        local_pts = pts - np.array([cx, cy, cz], dtype=np.float32)
+
+        # 2. 逆旋转（绕 z）
+        c = np.cos(-yaw)
+        s = np.sin(-yaw)
+        rot = np.array(
+            [[c, -s],
+             [s,  c]],
+            dtype=np.float32
+        )
+        local_xy = local_pts[:, :2] @ rot.T
+        local_z = local_pts[:, 2]
+
+        # 3. box 范围判断
+        mask = (
+            (np.abs(local_xy[:, 0]) <= dx / 2) &
+            (np.abs(local_xy[:, 1]) <= dy / 2) &
+            (np.abs(local_z) <= dz / 2)
+        )
+
+        num_lidar_pts[i] = int(mask.sum())
+
+    return num_lidar_pts
+
+def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
     """
     处理 GT：
     - 时间戳对齐
+    - 构建 gt_boxes
+    - 坐标系转换
+    - 重新计算 num_lidar_pts（基于点云）
     - annotation filter（min_points_by_class）
-    - 构建 gt_boxes / gt_names / valid_flag 等
     """
+
     # ---------- 时间对齐 ----------
     nearest_idx = find_nearest_ts_index(
         frame_info['label_ts_list'], frame_id
@@ -478,25 +514,6 @@ def process_gt_annotations(frame_info, frame_id):
     if not anno_data:
         return None
 
-    # ---------- GT annotation filter ----------
-    gt_filter_cfg = frame_info.get('gt_annotation_filter', None)
-    if gt_filter_cfg and gt_filter_cfg.get('enable', False):
-        min_pts_by_cls = gt_filter_cfg.get('min_points_by_class', {})
-
-        filtered_anno = []
-        for ann in anno_data:
-            cls_name = ann.get('subtype') or ann.get('name')
-            num_pts = ann.get('num_lidar_pts', 0)
-
-            min_req = min_pts_by_cls.get(cls_name, 0)
-            if num_pts >= min_req:
-                filtered_anno.append(ann)
-
-        anno_data = filtered_anno
-
-    if not anno_data:
-        return None
-
     # ---------- 构建 GT box ----------
     locs = np.array([s['xyz'] for s in anno_data], dtype=np.float32)
     dims = np.array([s['lwh'] for s in anno_data], dtype=np.float32)
@@ -507,6 +524,8 @@ def process_gt_annotations(frame_info, frame_id):
 
     gt_boxes = np.concatenate([locs, dims, rots], axis=1)
 
+    # ---------- 坐标系转换 ----------
+    # x前 y左 z上  ->  nus: x右 y前 z上
     if frame_info.get('coord_transform', False):
         gt_boxes[:, 0] = -locs[:, 1]
         gt_boxes[:, 1] =  locs[:, 0]
@@ -514,18 +533,151 @@ def process_gt_annotations(frame_info, frame_id):
         gt_boxes[:, 6] = rots[:, 0] + np.pi / 2
         gt_boxes[:, 6] = (gt_boxes[:, 6] + np.pi) % (2 * np.pi) - np.pi
 
+    # ---------- 重新计算 num_lidar_pts ----------
+    # num_lidar_pts = recompute_num_lidar_pts_fast(
+    #     gt_boxes=gt_boxes,
+    #     lidar_path=lidar_path,
+    #     device=device
+    # )
+    
+    # ---------- 重新计算 num_lidar_pts（按类别选择性） ----------
+    num_lidar_pts = np.zeros(len(anno_data), dtype=np.int32)
+
+    # 1️⃣ 先把非 WheelCrane 的直接从 label 里取
+    wheelcrane_indices = []
+    wheelcrane_boxes = []
+
+    for i, ann in enumerate(anno_data):
+        cls_name = ann.get('subtype') or ann.get('name')
+
+        if cls_name == 'WheelCrane':
+            wheelcrane_indices.append(i)
+            wheelcrane_boxes.append(gt_boxes[i])
+        else:
+            num_lidar_pts[i] = ann.get('num_lidar_pts', 0)
+
+    # 2️⃣ 只对 WheelCrane 走 CUDA / fast 版本
+    if wheelcrane_boxes:
+        wheelcrane_boxes = np.asarray(wheelcrane_boxes, dtype=np.float32)
+
+        wc_num_pts = recompute_num_lidar_pts_fast(
+            gt_boxes=wheelcrane_boxes,
+            lidar_path=lidar_path,
+            device=device
+        )
+
+        for idx, pts in zip(wheelcrane_indices, wc_num_pts):
+            num_lidar_pts[idx] = pts
+    # ---------- GT annotation filter ----------
+    gt_filter_cfg = frame_info.get('gt_annotation_filter', None)
+    if gt_filter_cfg and gt_filter_cfg.get('enable', False):
+        min_pts_by_cls = gt_filter_cfg.get('min_points_by_class', {})
+
+        keep_mask = []
+        for i, ann in enumerate(anno_data):
+            cls_name = ann.get('subtype') or ann.get('name')
+            min_req = min_pts_by_cls.get(cls_name, 0)
+            keep_mask.append(num_lidar_pts[i] >= min_req)
+
+        keep_mask = np.array(keep_mask, dtype=bool)
+
+        if not keep_mask.any():
+            return None
+
+        # 同步过滤
+        gt_boxes = gt_boxes[keep_mask]
+        num_lidar_pts = num_lidar_pts[keep_mask]
+        anno_data = [a for k, a in zip(keep_mask, anno_data) if k]
+
+    # ---------- 构建 gt_dict ----------
     gt_dict = {
         'gt_boxes': gt_boxes,
         'gt_names': np.array(get_class_name_from_type(anno_data)),
         'gt_velocity': np.zeros((len(anno_data), 2), dtype=np.float32),
-        'num_lidar_pts': [s['num_lidar_pts'] for s in anno_data],
+        'num_lidar_pts': num_lidar_pts.tolist(),
         'num_radar_pts': [0] * len(anno_data),
-        'valid_flag': [
-            s.get('num_lidar_pts', 0) > 0 for s in anno_data
-        ]
+        'valid_flag': (num_lidar_pts > 0).tolist()
     }
 
     return gt_dict
+
+# def process_gt_annotations(frame_info, frame_id,lidar_path):
+#     """
+#     处理 GT：
+#     - 时间戳对齐
+#     - annotation filter（min_points_by_class）
+#     - 构建 gt_boxes / gt_names / valid_flag 等
+#     """
+#     # ---------- 时间对齐 ----------
+#     nearest_idx = find_nearest_ts_index(
+#         frame_info['label_ts_list'], frame_id
+#     )
+#     nearest_ts = frame_info['label_ts_list'][nearest_idx]
+
+#     if abs(nearest_ts - frame_id) > frame_info['max_diff']:
+#         return None
+
+#     label_path = frame_info['label_file_list'][nearest_idx]
+#     if not label_path.exists():
+#         return None
+
+#     with open(label_path, 'r', encoding='utf-8') as f:
+#         anno_data = json.load(f)
+
+#     if not anno_data:
+#         return None
+
+#     # ---------- GT annotation filter ----------
+#     gt_filter_cfg = frame_info.get('gt_annotation_filter', None)
+#     if gt_filter_cfg and gt_filter_cfg.get('enable', False):
+#         min_pts_by_cls = gt_filter_cfg.get('min_points_by_class', {})
+
+#         filtered_anno = []
+#         for ann in anno_data:
+#             cls_name = ann.get('subtype') or ann.get('name')
+#             num_pts = ann.get('num_lidar_pts', 0)
+
+#             min_req = min_pts_by_cls.get(cls_name, 0)
+#             if num_pts >= min_req:
+#                 filtered_anno.append(ann)
+
+#         anno_data = filtered_anno
+
+#     if not anno_data:
+#         return None
+
+#     # ---------- 构建 GT box ----------
+#     locs = np.array([s['xyz'] for s in anno_data], dtype=np.float32)
+#     dims = np.array([s['lwh'] for s in anno_data], dtype=np.float32)
+#     rots = np.array(
+#         [s['rotation']['z'] for s in anno_data],
+#         dtype=np.float32
+#     ).reshape(-1, 1)
+
+#     # z means the center of the object
+#     gt_boxes = np.concatenate([locs, dims, rots], axis=1)
+
+#     # 我们的坐标系本身是x朝前，y朝左，z朝上，nus坐标系是x朝右，y朝前，z朝上，所以沿着z轴旋转90度
+#     # 所以新的坐标点，x=-y，y=x，z=z，yaw=yaw+90
+#     if frame_info.get('coord_transform', False):
+#         gt_boxes[:, 0] = -locs[:, 1]
+#         gt_boxes[:, 1] =  locs[:, 0]
+#         gt_boxes[:, 2] =  locs[:, 2]
+#         gt_boxes[:, 6] = rots[:, 0] + np.pi / 2
+#         gt_boxes[:, 6] = (gt_boxes[:, 6] + np.pi) % (2 * np.pi) - np.pi
+
+#     gt_dict = {
+#         'gt_boxes': gt_boxes,
+#         'gt_names': np.array(get_class_name_from_type(anno_data)),
+#         'gt_velocity': np.zeros((len(anno_data), 2), dtype=np.float32),
+#         'num_lidar_pts': [s['num_lidar_pts'] for s in anno_data],
+#         'num_radar_pts': [0] * len(anno_data),
+#         'valid_flag': [
+#             s.get('num_lidar_pts', 0) > 0 for s in anno_data
+#         ]
+#     }
+
+#     return gt_dict
 
 def process_frame(frame_info):
     frame_id = float(frame_info['frame_stem'])
@@ -542,6 +694,8 @@ def process_frame(frame_info):
         'ego2global_translation': [0, 0, 0],
         'ego2global_rotation': [1, 0, 0, 0],
         'timestamp': frame_id,
+        # 👇 保留 frame_info 里 GT 需要的信息
+        'frame_info': frame_info,
     }
 
     # =================== LiDAR ===================
@@ -554,17 +708,11 @@ def process_frame(frame_info):
 
     # =================== Camera ===================
     cams = process_cameras(frame_info, frame_id, scale=1.0 / 3.0)
-    if len(cams) != 6:
+    if len(cams) != len(frame_info['used_cameras']):
         return None
 
     info['cams'] = cams
 
-    # =================== GT ===================
-    gt_info = process_gt_annotations(frame_info, frame_id)
-    if gt_info is None:
-        return None
-
-    info.update(gt_info)
     return info
 
 
@@ -588,6 +736,31 @@ def find_lidar_parent_dirs(current_path):
         pass 
         
     return found_parents
+
+
+def process_gt_for_infos(infos, device='cuda'):
+    final_infos = []
+
+    for info in tqdm(infos, desc="Processing GT"):
+        frame_info = info.pop('frame_info')
+        frame_id = info['timestamp']
+        lidar_path = info['lidar_path']
+
+        gt_info = process_gt_annotations(
+            frame_info,
+            frame_id,
+            lidar_path=lidar_path,
+            device=device,   # 👈 只在这里用 CUDA
+        )
+
+        if gt_info is None:
+            continue
+
+        info.update(gt_info)
+        final_infos.append(info)
+
+    return final_infos
+
 # ------------------- 主函数 -------------------
 def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform = True,max_diff=0.05,cfg=None):
     # info_prefix = 'kl'
@@ -638,6 +811,32 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
         used_cameras = []
         camera_extrinsics_dict = {}
         camera_intrinsics_dict = {}
+                
+
+        # # ================== 【新增】camera_selection ==================
+        # camera_selection = None
+        # if cfg is not None and hasattr(cfg, 'camera_selection'):
+        #     camera_selection = cfg.camera_selection
+
+        # if camera_selection and camera_selection.get('enable', False):
+        #     selected = set(camera_selection.get('use_cameras', []))
+
+        #     used_cameras = [c for c in used_cameras if c in selected]
+
+        #     # 同步裁剪 extrinsics / intrinsics
+        #     camera_extrinsics_dict = {
+        #         k: v for k, v in camera_extrinsics_dict.items()
+        #         if k in used_cameras
+        #     }
+        #     camera_intrinsics_dict = {
+        #         k: v for k, v in camera_intrinsics_dict.items()
+        #         if k in used_cameras
+        #     }
+
+        #     if len(used_cameras) == 0:
+        #         continue  # 这个 scene 直接跳过
+        # # ==============================================================
+
 
         camera_prefix = 'Tx_baselink_camera_'
 
@@ -656,6 +855,34 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
             camera_intrinsics_dict[cam_name] = intr
             if cam_name not in used_cameras:
                 used_cameras.append(cam_name)
+
+
+        # ==========================================================
+        # ✅ camera_selection（作用在 cam_name 层）
+        # ==========================================================
+        camera_selection = None
+        if cfg is not None and hasattr(cfg, 'camera_selection'):
+            camera_selection = cfg.camera_selection
+
+        if camera_selection and camera_selection.get('enable', False):
+            selected = set(camera_selection.get('use_cameras', []))
+
+            # 只保留 selection 中的 camera
+            used_cameras = [c for c in used_cameras if c in selected]
+
+            camera_extrinsics_dict = {
+                c: v for c, v in camera_extrinsics_dict.items()
+                if c in used_cameras
+            }
+            camera_intrinsics_dict = {
+                c: v for c, v in camera_intrinsics_dict.items()
+                if c in used_cameras
+            }
+
+            if len(used_cameras) == 0:
+                continue
+        # ==========================================================
+
 
         # ---------- lidar 文件索引 ----------
         lidar_file_index = {}
@@ -737,6 +964,7 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
         
     num_workers = min(os.cpu_count(), 10)
     num_workers = 32
+    # num_workers = 1
     # all_infos = []
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # chunksize 设置为 10-20 比较合适
@@ -744,16 +972,33 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
                             total=len(frame_info_list), 
                             desc="Processing frames"))
     
-    # 过滤掉空的结果
-    all_infos = [res for res in results if res]
-    # with ProcessPoolExecutor(max_workers=num_workers) as executor:
-    #     futures = {executor.submit(process_frame, info): info for info in frame_info_list}
-    #     for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing frames"):
-    #         res = fut.result()
-    #         if res:
-    #             all_infos.append(res)
+    base_infos = [res for res in results if res]
+    print(f"[Stage 1] cam+lidar process, valid frames: {len(base_infos)}")
+    
+    # =================== GT ===================
+    all_infos = process_gt_for_infos(base_infos, device='cuda')
+    print(f"[Stage 2] gt process, final frames: {len(all_infos)}")
+    # gt_info = process_gt_annotations(frame_info, frame_id,lidar_path=info['lidar_path'])
+    # if gt_info is None:
+    #     return None
+
+    # info.update(gt_info)
+    # # 过滤掉空的结果
+    # all_infos = [res for res in results if res]
 
     n = len(all_infos)
+    
+    # all_infos = []
+
+    # for frame_info in tqdm(frame_info_list, desc="Processing frames"):
+    #     res = process_frame(frame_info)
+    #     if res:
+    #         all_infos.append(res)
+
+    # 查看label往图片上投影，验证内外参
+    # for info in all_infos:
+    #     validate_img_box(info)
+    
     rng = np.random.default_rng()
     perm = rng.permutation(n)
     split_idx = int(n*0.9)

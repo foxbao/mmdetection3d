@@ -359,6 +359,9 @@ if __name__ == '__main__':
         'data/kl_8/v1.0-trainval/label/20251110_007',
         'data/kl_8/v1.0-trainval/label/20251112_007',
         'data/kl_8/v1.0-trainval/label/20251113_007_chache',
+        'data/kl_8/v1.0-trainval/label/20251114_007',
+        'data/kl_8/v1.0-trainval/label/20251118_007',
+        'data/kl_8/v1.0-trainval/label/20251119_007',
     ]
     
     

@@ -7,9 +7,9 @@
       "request": "launch",
       "program": "${workspaceFolder}/tools/infer.py",
       "args": [
-        "--config","projects/BEVFusion/configs/bevfusion_yx_kl.py",
-        "--checkpoint","work_dirs/bevfusion_yx_kl_20260120/epoch_20.pth",
-        "--vis-mode","gt",
+        "--config","projects/BEVFusion/configs/bevfusion_lidar_camera_yx_kl.py",
+        "--checkpoint","work_dirs/bevfusion_lidar_camera_yx_kl/epoch_6.pth",
+        "--vis-mode","multi",
         "--no-aug"
       ],
       "env": {

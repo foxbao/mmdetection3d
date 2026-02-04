@@ -108,8 +108,21 @@ train_pipeline = [
     dict(
         type='ObjectNameFilter',
         classes=[
-            'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
-            'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+            "Pedestrian", 
+            "Car", 
+            "IGV-Full", 
+            "Truck", 
+            "Trailer-Empty", 
+            "Trailer-Full", 
+            "IGV-Empty", 
+            "Crane", 
+            "OtherVehicle", 
+            "Cone", 
+            "ContainerForklift", 
+            "Forklift", 
+            "Lorry", 
+            "ConstructionVehicle", 
+            "WheelCrane"
         ]),
     # Actually, 'GridMask' is not used here
     dict(

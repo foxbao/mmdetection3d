@@ -15,6 +15,30 @@ gt_annotation_filter = dict(
         "Forklift": 50,
         "Lorry": 50,
         "ConstructionVehicle": 50,
-        "WheelCrane": 100
+        "WheelCrane": 200
     }
 )
+
+
+camera_selection = dict(
+    enable=True,
+    use_cameras=[
+        "front",
+        "left_front",
+        "left_rear",
+        "rear",
+        "right_front",
+        "right_rear"
+    ]
+)
+
+# gt_box_clamp = dict(
+#     enable=True,
+#     by_class={
+#         "WheelCrane": dict(
+#             z=dict(
+#                 max=4.0
+#             )
+#         )
+#     }
+# )

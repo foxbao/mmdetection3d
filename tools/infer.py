@@ -16,8 +16,9 @@ import pyvista as pv
 from mmengine.runner import Runner
 from mmdet3d.registry import DATASETS
 from mmengine.config import Config
-from mmdet3d.apis import inference_multi_modality_detector
+from mmdet3d.apis import inference_multi_modality_detector,inference_multi_modality_detector_bao
 
+from utils.visualize_tools import save_multi_cam_images_from_path,save_multi_cam_images_with_boxes,visualize_black_bg_vista
 
 class_names = {
     0:"Pedestrian", 
@@ -37,145 +38,6 @@ class_names = {
     14:"WheelCrane"
 }
 
-def _create_pyvista_box_lines(box):
-    """
-    box:
-      [x, y, z, l, w, h, yaw]  (z is BOTTOM height)
-      or
-      [x, y, z, l, w, h, yaw, vx, vy]
-    """
-    box = np.asarray(box).astype(float)
-    x, y, z, l, w, h, yaw = box[:7]
-
-    # ✅ bottom -> center
-    z_center = z + h / 2
-
-    # 8 corners (local frame, centered)
-    corners = np.array([
-        [ l/2,  w/2, -h/2],
-        [ l/2, -w/2, -h/2],
-        [-l/2, -w/2, -h/2],
-        [-l/2,  w/2, -h/2],
-        [ l/2,  w/2,  h/2],
-        [ l/2, -w/2,  h/2],
-        [-l/2, -w/2,  h/2],
-        [-l/2,  w/2,  h/2],
-    ])
-
-    # rotation (z axis)
-    c, s = math.cos(yaw), math.sin(yaw)
-    R = np.array([
-        [c, -s, 0],
-        [s,  c, 0],
-        [0,  0, 1]
-    ])
-
-    corners = corners @ R.T + np.array([x, y, z_center])
-
-    # 12 edges
-    edges = np.array([
-        [0,1],[1,2],[2,3],[3,0],
-        [4,5],[5,6],[6,7],[7,4],
-        [0,4],[1,5],[2,6],[3,7]
-    ])
-
-    lines = np.hstack([[2, e[0], e[1]] for e in edges])
-
-    poly = pv.PolyData(corners)
-    poly.lines = lines
-
-    return poly
-
-
-def visualize_black_bg_vista(
-    points,
-    boxes,
-    labels=None,
-    scores=None,
-    score_thresh=0.0,
-    gt_boxes=None,
-    gt_labels=None,
-    focus_class_ids=None,   # ⭐ 语义完美
-):
-    """
-    PyVista version of visualize_black_bg
-    """
-
-    plotter = pv.Plotter()
-    plotter.set_background('black')
-
-    # ==========================
-    # 1️⃣ Point Cloud
-    # ==========================
-    pts = points[:, :3]
-    pc = pv.PolyData(pts)
-
-    plotter.add_points(
-        pc,
-        color='white',
-        point_size=1,
-        render_points_as_spheres=True
-    )
-
-    # ==========================
-    # 2️⃣ GT boxes
-    # ==========================
-    gt_label_pos = []
-    gt_label_text = []
-
-    if gt_boxes is not None:
-        for i, box in enumerate(gt_boxes):
-            # 默认 GT 框颜色
-            gt_color = 'green'
-
-            if gt_labels is not None and focus_class_ids:
-                label_id = int(gt_labels[i])
-                if label_id in focus_class_ids:
-                    gt_color = 'yellow'   # ⭐ 重点关注类别
-
-            box_lines = _create_pyvista_box_lines(box)
-            plotter.add_mesh(
-                box_lines,
-                color=gt_color,          # ✅ 只改这里
-                line_width=2
-            )
-
-            # label position (top center)
-            x, y, z, l, w, h, yaw = box[:7]
-            gt_label_pos.append([x, y, z + h / 2 + 0.2])
-
-            if gt_labels is not None:
-                label_id = int(gt_labels[i])
-                class_name = class_names.get(label_id, f'cls_{label_id}')
-                gt_label_text.append(class_name)
-            else:
-                gt_label_text.append('GT')
-
-    if len(gt_label_pos) > 0:
-        plotter.add_point_labels(
-            np.array(gt_label_pos),
-            gt_label_text,
-            text_color='green',
-            font_size=14,
-            point_size=0
-        )
-
-    # ==========================
-    # 3️⃣ Pred boxes (RED)
-    # ==========================
-    if boxes is not None:
-        for i, box in enumerate(boxes):
-            if scores is not None and scores[i] < score_thresh:
-                continue
-
-            box_lines = _create_pyvista_box_lines(box)
-            plotter.add_mesh(
-                box_lines,
-                color='red',
-                line_width=2
-            )
-
-    plotter.show()
 def create_pointcloud(points):
     """
     points: (M, 4) -> x, y, z, intensity
@@ -344,7 +206,6 @@ def parse_args():
 
 
 def main(args):
-
     cfg = Config.fromfile(args.config)
     # build the model from a config file and a checkpoint file
     model = init_model(cfg, args.checkpoint, device=args.device)
@@ -400,24 +261,24 @@ def main(args):
     elif args.vis_mode == 'multi':
         print('[VIS] Multi-modality mode')
 
-        assert args.img_dir is not None, 'multi mode requires --img-dir'
+        # assert args.img_dir is not None, 'multi mode requires --img-dir'
 
         dataset = build_val_dataset(cfg)
         for data in dataset:
             sample = data['data_samples']
 
             pcd_path = sample.lidar_path
-            ann_path = sample.ann_path
+            img_path = sample.img_path
+            ann_path = dataset.ann_file
             gt_info = sample.eval_ann_info
             gt_boxes = gt_info['gt_bboxes_3d'].tensor.cpu().numpy()
 
             with torch.no_grad():
-                result, infer_data = inference_multi_modality_detector(
+                result, infer_data = inference_multi_modality_detector_bao(
                     model,
                     pcd_path,
-                    args.img_dir,
-                    ann_path,
-                    args.cam_type
+                    img_path,
+                    # ann_path
                 )
 
             points = infer_data['inputs']['points'].cpu().numpy()
@@ -435,7 +296,7 @@ def main(args):
         print('[VIS] GroundTruth only mode (TRAIN dataset)')
 
         focus_classes = [
-            'WheelCrane',
+            # 'WheelCrane',
             # 以后想加直接加
             # 'Forklift',
             # 'Crane',
@@ -449,7 +310,10 @@ def main(args):
         for data in dataset:
             # -------- points --------
             points = data['inputs']['points'].cpu().numpy()
-
+            
+            # -------- images --------
+            img_paths=data['data_samples'].img_path
+            
             # -------- GT --------
             gt_instances = data['data_samples'].gt_instances_3d
             gt_boxes = gt_instances.bboxes_3d.tensor.cpu().numpy()
@@ -463,7 +327,12 @@ def main(args):
                 if not any(cls in focus_class_ids for cls in gt_labels):
                     continue
 
-
+            # save_multi_cam_images_from_path(img_paths)
+            save_multi_cam_images_with_boxes(
+                img_paths=img_paths,
+                gt_boxes=gt_boxes,
+                lidar2img=data['data_samples'].lidar2img
+            )
             # ✅ GT-only：boxes / labels / scores 直接传 None
             # visualize_black_bg(
             visualize_black_bg_vista(
