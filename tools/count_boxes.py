@@ -116,6 +116,7 @@ def count_boxes_multiple_folders(root_folders):
     print("\n============================")
     print("📈 所有文件夹合计统计结果")
     print("============================")
+    
     print(f"📦 总标注框数: {grand_total}")
 
     total_counts = merge_counters(all_counters)
@@ -355,6 +356,7 @@ if __name__ == '__main__':
         'data/kl_8/v1.0-trainval/label/20251031_007',
         'data/kl_8/v1.0-trainval/label/20251105_007',
         'data/kl_8/v1.0-trainval/label/20251106_007',
+        'data/kl_8/v1.0-trainval/label/20251107_007',
         'data/kl_8/v1.0-trainval/label/20251108_007',
         'data/kl_8/v1.0-trainval/label/20251110_007',
         'data/kl_8/v1.0-trainval/label/20251112_007',
@@ -362,6 +364,14 @@ if __name__ == '__main__':
         'data/kl_8/v1.0-trainval/label/20251114_007',
         'data/kl_8/v1.0-trainval/label/20251118_007',
         'data/kl_8/v1.0-trainval/label/20251119_007',
+        'data/kl_8/v1.0-trainval/label/20251120_007',
+        'data/kl_8/v1.0-trainval/label/20251121_007',
+        
+        'data/kl_8/v1.0-trainval/label/20260120_luntaidiao_007',
+        'data/kl_8/v1.0-trainval/label/20260120_you_007',
+        'data/kl_8/v1.0-trainval/label/20260120_zuo_007',
+        'data/kl_8/v1.0-trainval/label/20260121_luntaidiao_007',
+        'data/kl_8/v1.0-trainval/label/20260122_lun_007',
     ]
     
     

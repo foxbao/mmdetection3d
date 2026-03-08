@@ -273,9 +273,26 @@ class BaseDepthTransform(BaseViewTransform):
         camera2lidar_rots = camera2lidar[..., :3, :3]
         camera2lidar_trans = camera2lidar[..., :3, 3]
 
-        batch_size = len(points)
+        batch_size = img.shape[0]
         depth = torch.zeros(batch_size, img.shape[1], 1,
-                            *self.image_size).to(points[0].device)
+                            *self.image_size).to(img.device)
+
+        if points is None:
+            # camera-only inference: skip depth projection from points
+            extra_rots = lidar_aug_matrix[..., :3, :3]
+            extra_trans = lidar_aug_matrix[..., :3, 3]
+            geom = self.get_geometry(
+                camera2lidar[..., :3, :3],
+                camera2lidar[..., :3, 3],
+                cam_intrinsic[..., :3, :3],
+                img_aug_matrix[..., :3, :3],
+                img_aug_matrix[..., :3, 3],
+                extra_rots=extra_rots,
+                extra_trans=extra_trans,
+            )
+            x = self.get_cam_feats(img, depth)
+            x = self.bev_pool(geom, x)
+            return x
 
         for b in range(batch_size):
             cur_coords = points[b][:, :3]

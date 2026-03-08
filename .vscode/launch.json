@@ -1,22 +1,28 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "BEVFusion Test (Single GPU)",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/tools/infer.py",
-      "args": [
-        "--config","projects/BEVFusion/configs/bevfusion_lidar_camera_yx_kl.py",
-        "--checkpoint","work_dirs/bevfusion_lidar_camera_yx_kl/epoch_6.pth",
-        "--vis-mode","multi",
-        "--no-aug"
-      ],
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}"
-      },
-      "console": "integratedTerminal",
-      "justMyCode": false
-    }
-  ]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug BEVFusion (single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/tools/train.py",
+
+            "args": [
+                "projects/BEVFusion/configs/bevfusion_cam_voxel0075_second_secfpn_8xb4-cyclic-6e_nus-3d.py",
+                "--launcher", "none",
+                "--amp"
+            ],
+
+            "console": "integratedTerminal",
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+
+            "justMyCode": false,
+            "subProcess": false
+        }
+    ]
 }

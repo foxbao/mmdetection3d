@@ -148,6 +148,49 @@ class BEVFusionGlobalRotScaleTrans(GlobalRotScaleTrans):
     """Compared with `GlobalRotScaleTrans`, the augmentation order in this
     class is rotation, translation and scaling (RTS)."""
 
+    def _rot_bbox_points(self, input_dict: dict) -> None:
+        rotation = self.rot_range
+        noise_rotation = np.random.uniform(rotation[0], rotation[1])
+
+        if 'points' in input_dict:
+            if 'gt_bboxes_3d' in input_dict and \
+                    len(input_dict['gt_bboxes_3d'].tensor) != 0:
+                points, rot_mat_T = input_dict['gt_bboxes_3d'].rotate(
+                    noise_rotation, input_dict['points'])
+                input_dict['points'] = points
+            else:
+                rot_mat_T = input_dict['points'].rotate(noise_rotation)
+        else:
+            if 'gt_bboxes_3d' in input_dict and \
+                    len(input_dict['gt_bboxes_3d'].tensor) != 0:
+                input_dict['gt_bboxes_3d'].rotate(noise_rotation)
+            rot_mat_T = torch.Tensor([
+                [np.cos(noise_rotation), -np.sin(noise_rotation), 0],
+                [np.sin(noise_rotation), np.cos(noise_rotation), 0],
+                [0, 0, 1],
+            ])
+
+        input_dict['pcd_rotation'] = rot_mat_T
+        input_dict['pcd_rotation_angle'] = noise_rotation
+
+    def _trans_bbox_points(self, input_dict: dict) -> None:
+        translation_std = np.array(self.translation_std, dtype=np.float32)
+        trans_factor = np.random.normal(scale=translation_std, size=3).T
+
+        if 'points' in input_dict:
+            input_dict['points'].translate(trans_factor)
+        input_dict['pcd_trans'] = trans_factor
+        if 'gt_bboxes_3d' in input_dict:
+            input_dict['gt_bboxes_3d'].translate(trans_factor)
+
+    def _scale_bbox_points(self, input_dict: dict) -> None:
+        scale = input_dict['pcd_scale_factor']
+        if 'points' in input_dict:
+            input_dict['points'].scale(scale)
+        if 'gt_bboxes_3d' in input_dict and \
+                len(input_dict['gt_bboxes_3d'].tensor) != 0:
+            input_dict['gt_bboxes_3d'].scale(scale)
+
     def transform(self, input_dict: dict) -> dict:
         """Private function to rotate, scale and translate bounding boxes and
         points.

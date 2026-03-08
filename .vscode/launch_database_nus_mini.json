@@ -11,7 +11,7 @@
           "--root-path", "./data/nuscenes",
           "--out-dir", "./data/nuscenes",
           "--extra-tag", "nuscenes",
-          "--version", "v1.0-mini",
+          "--version", "v1.0-mini"
         ],
         "console": "integratedTerminal",
         "justMyCode": false

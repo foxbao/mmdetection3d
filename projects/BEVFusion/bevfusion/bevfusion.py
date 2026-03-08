@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from mmdet3d.models import Base3DDetector
+from mmdet3d.models.dense_heads.centerpoint_head import CenterHead
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import Det3DDataSample
 from mmdet3d.utils import OptConfigType, OptMultiConfig, OptSampleList
@@ -35,14 +36,19 @@ class BEVFusion(Base3DDetector):
         seg_head: Optional[dict] = None,
         **kwargs,
     ) -> None:
-        voxelize_cfg = data_preprocessor.pop('voxelize_cfg')
+        voxelize_cfg = data_preprocessor.pop('voxelize_cfg', None)
         super().__init__(
             data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
-        self.voxelize_reduce = voxelize_cfg.pop('voxelize_reduce')
-        self.pts_voxel_layer = Voxelization(**voxelize_cfg)
+        if voxelize_cfg is not None:
+            self.voxelize_reduce = voxelize_cfg.pop('voxelize_reduce')
+            self.pts_voxel_layer = Voxelization(**voxelize_cfg)
+        else:
+            self.voxelize_reduce = False
+            self.pts_voxel_layer = None
 
-        self.pts_voxel_encoder = MODELS.build(pts_voxel_encoder)
+        self.pts_voxel_encoder = MODELS.build(
+            pts_voxel_encoder) if pts_voxel_encoder is not None else None
 
         self.img_backbone = MODELS.build(
             img_backbone) if img_backbone is not None else None
@@ -50,13 +56,16 @@ class BEVFusion(Base3DDetector):
             img_neck) if img_neck is not None else None
         self.view_transform = MODELS.build(
             view_transform) if view_transform is not None else None
-        self.pts_middle_encoder = MODELS.build(pts_middle_encoder)
+        self.pts_middle_encoder = MODELS.build(
+            pts_middle_encoder) if pts_middle_encoder is not None else None
 
         self.fusion_layer = MODELS.build(
             fusion_layer) if fusion_layer is not None else None
 
-        self.pts_backbone = MODELS.build(pts_backbone)
-        self.pts_neck = MODELS.build(pts_neck)
+        self.pts_backbone = MODELS.build(
+            pts_backbone) if pts_backbone is not None else None
+        self.pts_neck = MODELS.build(
+            pts_neck) if pts_neck is not None else None
 
         self.bbox_head = MODELS.build(bbox_head)
 
@@ -231,7 +240,11 @@ class BEVFusion(Base3DDetector):
         feats = self.extract_feat(batch_inputs_dict, batch_input_metas)
 
         if self.with_bbox_head:
-            outputs = self.bbox_head.predict(feats, batch_input_metas)
+            if isinstance(self.bbox_head, CenterHead):
+                outputs = self.bbox_head.predict(
+                    [feats], batch_data_samples)
+            else:
+                outputs = self.bbox_head.predict(feats, batch_input_metas)
 
         res = self.add_pred_to_datasample(batch_data_samples, outputs)
 
@@ -269,8 +282,9 @@ class BEVFusion(Base3DDetector):
                                                 lidar_aug_matrix,
                                                 batch_input_metas)
             features.append(img_feature)
-        pts_feature = self.extract_pts_feat(batch_inputs_dict)
-        features.append(pts_feature)
+        if self.pts_middle_encoder is not None:
+            pts_feature = self.extract_pts_feat(batch_inputs_dict)
+            features.append(pts_feature)
 
         if self.fusion_layer is not None:
             x = self.fusion_layer(features)
@@ -278,8 +292,10 @@ class BEVFusion(Base3DDetector):
             assert len(features) == 1, features
             x = features[0]
 
-        x = self.pts_backbone(x)
-        x = self.pts_neck(x)
+        if self.pts_backbone is not None:
+            x = self.pts_backbone(x)
+        if self.pts_neck is not None:
+            x = self.pts_neck(x)
 
         return x
 
@@ -291,7 +307,10 @@ class BEVFusion(Base3DDetector):
 
         losses = dict()
         if self.with_bbox_head:
-            bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
+            if isinstance(self.bbox_head, CenterHead):
+                bbox_loss = self.bbox_head.loss([feats], batch_data_samples)
+            else:
+                bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
 
         losses.update(bbox_loss)
 
