@@ -9,7 +9,7 @@
             "program": "${workspaceFolder}/tools/train.py",
 
             "args": [
-                "projects/BEVFusion/configs/bevfusion_cam_resnet_kl.py",
+                "projects/BEVFusion/configs/bevfusion_cam_voxel0075_second_secfpn_8xb4-cyclic-6e_nus-3d.py",
                 "--launcher", "none",
                 "--amp"
             ],

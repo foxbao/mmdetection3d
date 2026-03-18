@@ -12,7 +12,6 @@
         "--out-dir", "./data/kl_8",
         "--extra-tag", "kl",
         "--version", "v1.0-trainval",
-        "--max-sweeps", "1",
         "--cfg", "projects/BEVFusion/configs/kl_8.py"
       ],
       "console": "integratedTerminal",

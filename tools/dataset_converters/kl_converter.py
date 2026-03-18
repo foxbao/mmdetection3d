@@ -45,8 +45,6 @@ kl_categories = ( "Pedestrian",
                  "ConstructionVehicle", 
                  "WheelCrane" )
 
-MAIN_LIDAR = "helios_front_left"
-
 # ------------------- 点云读取 -------------------
 def read_pcd_with_intensity(pcd_path):
     with open(pcd_path, 'rb') as f:
@@ -272,6 +270,7 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
 
         img = cv2.imread(str(img_path))
         if img is None:
+            print(f'[WARNING] cv2.imread returned None for: {img_path}')
             continue
 
         h, w = img.shape[:2]
@@ -383,27 +382,56 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
 
     return cams
 
-def recompute_num_lidar_pts_fast(
+def recompute_num_lidar_pts(
     gt_boxes,
     lidar_path,
     device='cpu',
     origin=(0.5, 0.5, 0.5)
 ):
     """
+    计算每个 GT box 内的点云数量。
+
+    根据 device 参数选择后端：
+    - 'cuda' / 'cpu': 使用 torch + LiDARInstance3DBoxes（批量化，适合 GPU 加速）
+    - 'numpy': 纯 NumPy 逐 box 计算（多进程安全，无 torch 依赖）
+
     Args:
         gt_boxes (np.ndarray): (M, 7) [x,y,z,dx,dy,dz,yaw]
-        lidar_path (str or Path): merged lidar bin
+        lidar_path (str or Path): merged lidar bin (5-dim float32)
+        device (str): 'cuda', 'cpu', or 'numpy'
+        origin (tuple): box origin for LiDARInstance3DBoxes (torch backend only)
     Returns:
-        num_lidar_pts (np.ndarray): (M,)
+        num_lidar_pts (np.ndarray): (M,) int32
     """
     M = len(gt_boxes)
     if M == 0:
         return np.zeros((0,), dtype=np.int32)
 
     # ---------- load points ----------
+    # merged bin is 5-dim (x,y,z,intensity,timestamp_2us) from read_pcd_with_intensity()
     points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
     points_xyz = points[:, :3]
 
+    if device == 'numpy':
+        # ---------- NumPy backend (multi-process safe, no torch) ----------
+        num_lidar_pts = np.zeros((M,), dtype=np.int32)
+        for i in range(M):
+            cx, cy, cz, dx, dy, dz, yaw = gt_boxes[i]
+            local_pts = points_xyz - np.array([cx, cy, cz], dtype=np.float32)
+            c = np.cos(-yaw)
+            s = np.sin(-yaw)
+            rot = np.array([[c, -s], [s, c]], dtype=np.float32)
+            local_xy = local_pts[:, :2] @ rot.T
+            local_z = local_pts[:, 2]
+            mask = (
+                (np.abs(local_xy[:, 0]) <= dx / 2) &
+                (np.abs(local_xy[:, 1]) <= dy / 2) &
+                (np.abs(local_z) <= dz / 2)
+            )
+            num_lidar_pts[i] = int(mask.sum())
+        return num_lidar_pts
+
+    # ---------- Torch backend ----------
     pts = torch.from_numpy(points_xyz).float()
     boxes = torch.from_numpy(gt_boxes[:, :7]).float()
 
@@ -417,71 +445,15 @@ def recompute_num_lidar_pts_fast(
         origin=origin
     )
 
-    # ---------- NEW API ----------
     # (N,) int tensor, value in [-1, M-1]
     point_box_ids = boxes3d.points_in_boxes_part(pts)
 
-    # ---------- count ----------
     num_lidar_pts = np.zeros((M,), dtype=np.int32)
     ids = point_box_ids.cpu().numpy()
 
     valid = ids >= 0
     box_ids, counts = np.unique(ids[valid], return_counts=True)
     num_lidar_pts[box_ids] = counts
-
-    return num_lidar_pts
-
-def recompute_num_lidar_pts_numpy(
-    gt_boxes: np.ndarray,
-    lidar_path,
-):
-    """
-    纯 NumPy 版本 points-in-box
-    多进程安全（无 torch）
-
-    Args:
-        gt_boxes: (N, 7) [x, y, z, dx, dy, dz, yaw]
-        lidar_path: .bin path (Nx4 float32)
-
-    Returns:
-        num_lidar_pts: (N,) int32
-    """
-    num_boxes = gt_boxes.shape[0]
-    if num_boxes == 0:
-        return np.zeros((0,), dtype=np.int32)
-
-    # ---------- load lidar ----------
-    points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
-    pts = points[:, :3]  # (M, 3)
-
-    num_lidar_pts = np.zeros((num_boxes,), dtype=np.int32)
-
-    # ---------- per box ----------
-    for i in range(num_boxes):
-        cx, cy, cz, dx, dy, dz, yaw = gt_boxes[i]
-
-        # 1. 平移
-        local_pts = pts - np.array([cx, cy, cz], dtype=np.float32)
-
-        # 2. 逆旋转（绕 z）
-        c = np.cos(-yaw)
-        s = np.sin(-yaw)
-        rot = np.array(
-            [[c, -s],
-             [s,  c]],
-            dtype=np.float32
-        )
-        local_xy = local_pts[:, :2] @ rot.T
-        local_z = local_pts[:, 2]
-
-        # 3. box 范围判断
-        mask = (
-            (np.abs(local_xy[:, 0]) <= dx / 2) &
-            (np.abs(local_xy[:, 1]) <= dy / 2) &
-            (np.abs(local_z) <= dz / 2)
-        )
-
-        num_lidar_pts[i] = int(mask.sum())
 
     return num_lidar_pts
 
@@ -506,6 +478,7 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
 
     label_path = frame_info['label_file_list'][nearest_idx]
     if not label_path.exists():
+        print(f'[WARNING] label file not found: {label_path}')
         return None
 
     with open(label_path, 'r', encoding='utf-8') as f:
@@ -533,17 +506,11 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
         gt_boxes[:, 6] = rots[:, 0] + np.pi / 2
         gt_boxes[:, 6] = (gt_boxes[:, 6] + np.pi) % (2 * np.pi) - np.pi
 
-    # ---------- 重新计算 num_lidar_pts ----------
-    # num_lidar_pts = recompute_num_lidar_pts_fast(
-    #     gt_boxes=gt_boxes,
-    #     lidar_path=lidar_path,
-    #     device=device
-    # )
-    
     # ---------- 重新计算 num_lidar_pts（按类别选择性） ----------
+    # WheelCrane 的标注 num_lidar_pts 值不准确（标注工具 bug），需要通过点云重算。
+    # 其他类别的标注值是可信的，直接使用 label 中的值以节省计算。
     num_lidar_pts = np.zeros(len(anno_data), dtype=np.int32)
 
-    # 1️⃣ 先把非 WheelCrane 的直接从 label 里取
     wheelcrane_indices = []
     wheelcrane_boxes = []
 
@@ -556,11 +523,10 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
         else:
             num_lidar_pts[i] = ann.get('num_lidar_pts', 0)
 
-    # 2️⃣ 只对 WheelCrane 走 CUDA / fast 版本
     if wheelcrane_boxes:
         wheelcrane_boxes = np.asarray(wheelcrane_boxes, dtype=np.float32)
 
-        wc_num_pts = recompute_num_lidar_pts_fast(
+        wc_num_pts = recompute_num_lidar_pts(
             gt_boxes=wheelcrane_boxes,
             lidar_path=lidar_path,
             device=device
@@ -600,84 +566,6 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
     }
 
     return gt_dict
-
-# def process_gt_annotations(frame_info, frame_id,lidar_path):
-#     """
-#     处理 GT：
-#     - 时间戳对齐
-#     - annotation filter（min_points_by_class）
-#     - 构建 gt_boxes / gt_names / valid_flag 等
-#     """
-#     # ---------- 时间对齐 ----------
-#     nearest_idx = find_nearest_ts_index(
-#         frame_info['label_ts_list'], frame_id
-#     )
-#     nearest_ts = frame_info['label_ts_list'][nearest_idx]
-
-#     if abs(nearest_ts - frame_id) > frame_info['max_diff']:
-#         return None
-
-#     label_path = frame_info['label_file_list'][nearest_idx]
-#     if not label_path.exists():
-#         return None
-
-#     with open(label_path, 'r', encoding='utf-8') as f:
-#         anno_data = json.load(f)
-
-#     if not anno_data:
-#         return None
-
-#     # ---------- GT annotation filter ----------
-#     gt_filter_cfg = frame_info.get('gt_annotation_filter', None)
-#     if gt_filter_cfg and gt_filter_cfg.get('enable', False):
-#         min_pts_by_cls = gt_filter_cfg.get('min_points_by_class', {})
-
-#         filtered_anno = []
-#         for ann in anno_data:
-#             cls_name = ann.get('subtype') or ann.get('name')
-#             num_pts = ann.get('num_lidar_pts', 0)
-
-#             min_req = min_pts_by_cls.get(cls_name, 0)
-#             if num_pts >= min_req:
-#                 filtered_anno.append(ann)
-
-#         anno_data = filtered_anno
-
-#     if not anno_data:
-#         return None
-
-#     # ---------- 构建 GT box ----------
-#     locs = np.array([s['xyz'] for s in anno_data], dtype=np.float32)
-#     dims = np.array([s['lwh'] for s in anno_data], dtype=np.float32)
-#     rots = np.array(
-#         [s['rotation']['z'] for s in anno_data],
-#         dtype=np.float32
-#     ).reshape(-1, 1)
-
-#     # z means the center of the object
-#     gt_boxes = np.concatenate([locs, dims, rots], axis=1)
-
-#     # 我们的坐标系本身是x朝前，y朝左，z朝上，nus坐标系是x朝右，y朝前，z朝上，所以沿着z轴旋转90度
-#     # 所以新的坐标点，x=-y，y=x，z=z，yaw=yaw+90
-#     if frame_info.get('coord_transform', False):
-#         gt_boxes[:, 0] = -locs[:, 1]
-#         gt_boxes[:, 1] =  locs[:, 0]
-#         gt_boxes[:, 2] =  locs[:, 2]
-#         gt_boxes[:, 6] = rots[:, 0] + np.pi / 2
-#         gt_boxes[:, 6] = (gt_boxes[:, 6] + np.pi) % (2 * np.pi) - np.pi
-
-#     gt_dict = {
-#         'gt_boxes': gt_boxes,
-#         'gt_names': np.array(get_class_name_from_type(anno_data)),
-#         'gt_velocity': np.zeros((len(anno_data), 2), dtype=np.float32),
-#         'num_lidar_pts': [s['num_lidar_pts'] for s in anno_data],
-#         'num_radar_pts': [0] * len(anno_data),
-#         'valid_flag': [
-#             s.get('num_lidar_pts', 0) > 0 for s in anno_data
-#         ]
-#     }
-
-#     return gt_dict
 
 def process_frame(frame_info):
     frame_id = float(frame_info['frame_stem'])
@@ -777,13 +665,23 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     lidar_dirs = find_lidar_parent_dirs(sample_path)
     lidar_dirs = list(set(lidar_dirs))
     # for scene_path in lidar_dirs:
+    total_label_count = 0
+    skip_no_label = 0
+    skip_no_extrinsics = 0
     for scene_path in tqdm(lidar_dirs, desc="Scanning scenes", unit="scene"):
         label_path_scene = Path(str(scene_path).replace('sample','label'))
         if not label_path_scene.exists():
+            skip_no_label += 1
+            print(f'[SKIP] no label dir: {label_path_scene}')
             continue
         # ---------- 标定文件路径 ----------
         extrinsics_path = scene_path / 'extrinsics.json'
         if not extrinsics_path.exists():
+            # 统计被跳过的 label 数量
+            skipped_labels = len([p for p in label_path_scene.iterdir() if p.is_file()])
+            total_label_count += skipped_labels
+            skip_no_extrinsics += 1
+            print(f'[SKIP] no extrinsics: {scene_path.name}, has {skipped_labels} labels, total={total_label_count}')
             continue  # lidar 外参是必须的
         
         parent_path = scene_path.parent
@@ -811,32 +709,6 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
         used_cameras = []
         camera_extrinsics_dict = {}
         camera_intrinsics_dict = {}
-                
-
-        # # ================== 【新增】camera_selection ==================
-        # camera_selection = None
-        # if cfg is not None and hasattr(cfg, 'camera_selection'):
-        #     camera_selection = cfg.camera_selection
-
-        # if camera_selection and camera_selection.get('enable', False):
-        #     selected = set(camera_selection.get('use_cameras', []))
-
-        #     used_cameras = [c for c in used_cameras if c in selected]
-
-        #     # 同步裁剪 extrinsics / intrinsics
-        #     camera_extrinsics_dict = {
-        #         k: v for k, v in camera_extrinsics_dict.items()
-        #         if k in used_cameras
-        #     }
-        #     camera_intrinsics_dict = {
-        #         k: v for k, v in camera_intrinsics_dict.items()
-        #         if k in used_cameras
-        #     }
-
-        #     if len(used_cameras) == 0:
-        #         continue  # 这个 scene 直接跳过
-        # # ==============================================================
-
 
         camera_prefix = 'Tx_baselink_camera_'
 
@@ -891,6 +763,7 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
         for lidar_name in used_lidars:
             lidar_path = scene_path / 'lidar' / lidar_name
             if not lidar_path.exists():
+                print(f'[WARNING] lidar dir not found: {lidar_path}')
                 continue
 
             files = list(lidar_path.glob('*.pcd'))
@@ -934,6 +807,9 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
             key=lambda p: float(p.stem)
         )
 
+        total_label_count += len(label_files)
+        
+
         label_ts_list = np.array([float(p.stem) for p in label_files])
 
         save_path = out_sample_path
@@ -961,10 +837,12 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
             })
 
 
-        
-    num_workers = min(os.cpu_count(), 10)
-    num_workers = 32
-    # num_workers = 1
+    
+    print(f'\n[SUMMARY] total_label_count={total_label_count}, '
+          f'lidar_dirs={len(lidar_dirs)}, '
+          f'skip_no_label={skip_no_label}, skip_no_extrinsics={skip_no_extrinsics}')
+
+    num_workers = min(32, os.cpu_count())
     # all_infos = []
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # chunksize 设置为 10-20 比较合适
@@ -1017,8 +895,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     return train_results, val_results
 
 
-def create_kl_infos(data_root, info_prefix, version='v1.0-trainval', max_sweeps = 1,cfg=None):
-    generate_frame_bin_parallel(data_root, info_prefix, version,cfg=cfg)
+def create_kl_infos(data_root, info_prefix, version='v1.0-trainval', cfg=None):
+    generate_frame_bin_parallel(data_root, info_prefix, version, cfg=cfg)
 
 
 # ------------------- 脚本入口 -------------------

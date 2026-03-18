@@ -366,12 +366,19 @@ if __name__ == '__main__':
         'data/kl_8/v1.0-trainval/label/20251119_007',
         'data/kl_8/v1.0-trainval/label/20251120_007',
         'data/kl_8/v1.0-trainval/label/20251121_007',
-        
+        'data/kl_8/v1.0-trainval/label/20251124_007',
         'data/kl_8/v1.0-trainval/label/20260120_luntaidiao_007',
         'data/kl_8/v1.0-trainval/label/20260120_you_007',
         'data/kl_8/v1.0-trainval/label/20260120_zuo_007',
         'data/kl_8/v1.0-trainval/label/20260121_luntaidiao_007',
         'data/kl_8/v1.0-trainval/label/20260122_lun_007',
+        
+        'data/kl_8/v1.0-trainval/label/20260122_007',
+        'data/kl_8/v1.0-trainval/label/20260126_igvzhuang_007',
+        'data/kl_8/v1.0-trainval/label/20260126_lun_007',
+        'data/kl_8/v1.0-trainval/label/20260126_you_007',
+        'data/kl_8/v1.0-trainval/label/20260126_zuo_007',
+        'data/kl_8/v1.0-trainval/label/20260127_lunc_007',
     ]
     
     

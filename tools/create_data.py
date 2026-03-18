@@ -92,7 +92,6 @@ def kl_data_prep(root_path,
                        version,
                        dataset_name,
                        out_dir,
-                       max_sweeps=10,
                        cfg=None):
     """Prepare data related to kl dataset.
 
@@ -105,11 +104,9 @@ def kl_data_prep(root_path,
         version (str): Dataset version.
         dataset_name (str): The dataset class name.
         out_dir (str): Output directory of the groundtruth database info.
-        max_sweeps (int, optional): Number of input consecutive frames.
-            Default: 10
     """
     kl_converter.create_kl_infos(
-        root_path, info_prefix, version=version, max_sweeps=max_sweeps,cfg=cfg)
+        root_path, info_prefix, version=version, cfg=cfg)
 
 
     info_train_path = osp.join(out_dir, f'{info_prefix}_infos_train.pkl')
@@ -389,7 +386,6 @@ if __name__ == '__main__':
             version=train_version,
             dataset_name='KlDataset',
             out_dir=args.out_dir,
-            max_sweeps=args.max_sweeps,
             cfg=cfg)
 
     elif args.dataset == 'lyft':

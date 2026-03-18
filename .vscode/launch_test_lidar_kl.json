@@ -8,7 +8,7 @@
       "program": "${workspaceFolder}/tools/test.py",
       "args": [
         "projects/BEVFusion/configs/bevfusion_yx_kl.py",
-        "work_dirs/bevfusion_yx_kl/epoch_20.pth",
+        "work_dirs/bevfusion_yx_kl/epoch_2.pth",
         "--launcher",
         "none"
       ],
