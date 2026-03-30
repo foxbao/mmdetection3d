@@ -1,29 +1,28 @@
-_base_ = [
-    # 'mmdet3d::_base_/datasets/nus-3d.py',
-    '../../../configs/_base_/default_runtime.py'
-]
+_base_ = ['../../../configs/_base_/default_runtime.py']
 
 custom_imports = dict(imports=['projects.DETR3D.detr3d'])
-# If point cloud range is changed, the models should also change their point
-# cloud range accordingly
-point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+
+point_cloud_range = [-48.0, -48.0, -2.0, 48.0, 48.0, 6.0]
 voxel_size = [0.2, 0.2, 8]
 
 img_norm_cfg = dict(
     mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], bgr_to_rgb=False)
-# For nuScenes we usually do 10-class detection
+
 class_names = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+    'Pedestrian', 'Car', 'IGV-Full', 'Truck', 'Trailer-Empty',
+    'Trailer-Full', 'IGV-Empty', 'Crane', 'OtherVehicle', 'Cone',
+    'ContainerForklift', 'Forklift', 'Lorry', 'ConstructionVehicle',
+    'WheelCrane'
 ]
 
+# Pure camera-only: no LiDAR needed at all
 input_modality = dict(
     use_lidar=False,
     use_camera=True,
     use_radar=False,
     use_map=False,
     use_external=False)
-# this means type='DETR3D' will be processed as 'mmdet3d.DETR3D'
+
 default_scope = 'mmdet3d'
 model = dict(
     type='DETR3D',
@@ -52,7 +51,7 @@ model = dict(
     pts_bbox_head=dict(
         type='DETR3DHead',
         num_query=900,
-        num_classes=10,
+        num_classes=15,
         in_channels=256,
         sync_cls_avg_factor=True,
         with_box_refine=True,
@@ -67,7 +66,7 @@ model = dict(
                     type='DetrTransformerDecoderLayer',
                     attn_cfgs=[
                         dict(
-                            type='MultiheadAttention',  # mmcv.
+                            type='MultiheadAttention',
                             embed_dims=256,
                             num_heads=8,
                             dropout=0.1),
@@ -83,11 +82,11 @@ model = dict(
                                      'ffn', 'norm')))),
         bbox_coder=dict(
             type='NMSFreeCoder',
-            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            post_center_range=[-55.0, -55.0, -10.0, 55.0, 55.0, 10.0],
             pc_range=point_cloud_range,
             max_num=300,
             voxel_size=voxel_size,
-            num_classes=10),
+            num_classes=15),
         positional_encoding=dict(
             type='mmdet.SinePositionalEncoding',
             num_feats=128,
@@ -101,7 +100,6 @@ model = dict(
             loss_weight=2.0),
         loss_bbox=dict(type='mmdet.L1Loss', loss_weight=0.25),
         loss_iou=dict(type='mmdet.GIoULoss', loss_weight=0.0)),
-    # model training and testing settings
     train_cfg=dict(
         pts=dict(
             grid_size=[512, 512, 1],
@@ -112,23 +110,27 @@ model = dict(
                 type='HungarianAssigner3D',
                 cls_cost=dict(type='mmdet.FocalLossCost', weight=2.0),
                 reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-                # ↓ Fake cost. This is just to get compatible with DETR head
                 iou_cost=dict(type='mmdet.IoUCost', weight=0.0),
                 pc_range=point_cloud_range))))
 
-dataset_type = 'NuScenesDataset'
-data_root = 'data/nuscenes/'
+dataset_type = 'KlDataset'
+data_root = 'data/kl_8/'
+# All KL cameras share the same base directory (not split into per-camera subdirs)
+data_prefix = dict(img='v1.0-trainval/sample')
+backend_args = None
+metainfo = dict(classes=class_names)
 
+# KL images are stored at 1/3 scale of 1920x1536 original -> 640x512
+# ratio_range=(1., 1.) means no resize (keep at stored resolution)
 test_transforms = [
     dict(
         type='RandomResize3D',
-        scale=(1600, 900),
+        scale=(640, 512),
         ratio_range=(1., 1.),
         keep_ratio=True)
 ]
 train_transforms = [dict(type='PhotoMetricDistortion3D')] + test_transforms
 
-backend_args = None
 train_pipeline = [
     dict(
         type='LoadMultiViewImageFromFiles',
@@ -156,16 +158,6 @@ test_pipeline = [
     dict(type='Pack3DDetInputs', keys=['img'])
 ]
 
-metainfo = dict(classes=class_names)
-data_prefix = dict(
-    pts='',
-    CAM_FRONT='samples/CAM_FRONT',
-    CAM_FRONT_LEFT='samples/CAM_FRONT_LEFT',
-    CAM_FRONT_RIGHT='samples/CAM_FRONT_RIGHT',
-    CAM_BACK='samples/CAM_BACK',
-    CAM_BACK_RIGHT='samples/CAM_BACK_RIGHT',
-    CAM_BACK_LEFT='samples/CAM_BACK_LEFT')
-
 train_dataloader = dict(
     batch_size=1,
     num_workers=4,
@@ -173,19 +165,20 @@ train_dataloader = dict(
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        ann_file='nuscenes_infos_train.pkl',
-        pipeline=train_pipeline,
-        load_type='frame_based',
-        metainfo=metainfo,
-        modality=input_modality,
-        test_mode=False,
-        data_prefix=data_prefix,
-        # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
-        # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-        box_type_3d='LiDAR',
-        backend_args=backend_args))
+        type='CBGSDataset',
+        dataset=dict(
+            type=dataset_type,
+            data_root=data_root,
+            ann_file='kl_infos_train.pkl',
+            pipeline=train_pipeline,
+            load_type='frame_based',
+            metainfo=metainfo,
+            modality=input_modality,
+            test_mode=False,
+            data_prefix=data_prefix,
+            box_type_3d='LiDAR',
+            use_valid_flag=True,
+            backend_args=backend_args)))
 
 val_dataloader = dict(
     batch_size=1,
@@ -196,7 +189,7 @@ val_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='nuscenes_infos_val.pkl',
+        ann_file='kl_infos_val.pkl',
         load_type='frame_based',
         pipeline=test_pipeline,
         metainfo=metainfo,
@@ -209,9 +202,9 @@ val_dataloader = dict(
 test_dataloader = val_dataloader
 
 val_evaluator = dict(
-    type='NuScenesMetric',
+    type='KlMetric',
     data_root=data_root,
-    ann_file=data_root + 'nuscenes_infos_val.pkl',
+    ann_file=data_root + 'kl_infos_val.pkl',
     metric='bbox',
     backend_args=backend_args)
 test_evaluator = val_evaluator
@@ -220,10 +213,8 @@ optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=2e-4, weight_decay=0.01),
     paramwise_cfg=dict(custom_keys={'img_backbone': dict(lr_mult=0.1)}),
-    clip_grad=dict(max_norm=35, norm_type=2),
-)
+    clip_grad=dict(max_norm=35, norm_type=2))
 
-# learning policy
 param_scheduler = [
     dict(
         type='LinearLR',
@@ -240,21 +231,19 @@ param_scheduler = [
         eta_min_ratio=1e-3)
 ]
 
-total_epochs = 24
-
-train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=total_epochs, val_interval=2)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=4)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
+
 default_hooks = dict(
     checkpoint=dict(
-        type='CheckpointHook', interval=1, max_keep_ckpts=1, save_last=True))
-load_from = 'ckpts/fcos3d.pth'
-# fcos3d was trained with 8 GPUs x bs1; auto-scale LR when GPU count differs
-auto_scale_lr = dict(enable=True, base_batch_size=8)
+        type='CheckpointHook', interval=1, max_keep_ckpts=3, save_last=True))
 
-# setuptools 65 downgrades to 58.
-# In mmlab-node we use setuptools 61 but occurs NO errors
+# DETR3D trained on NuScenes (ResNet101 + DCN backbone).
+# Head weights (10 classes) won't match KL (15 classes) and will be skipped;
+# backbone + neck weights will be loaded for better initialization.
+load_from = 'ckpts/detr3d_r101_gridmask_nus.pth'
+
 vis_backends = [dict(type='TensorboardVisBackend')]
 visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')

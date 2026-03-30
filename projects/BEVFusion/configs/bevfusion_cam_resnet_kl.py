@@ -199,7 +199,8 @@ train_pipeline = [
     dict(
         type='ImageAug3D',
         final_dim=[512, 640],
-        resize_lim=[0.38, 0.55],
+        # resize_lim=[0.9, 1.1],  # stored imgs are 640x512 (1920x1536 / 3), matching final_dim exactly
+        resize_lim=[1.0, 1.0],  # stored imgs are 640x512 (1920x1536 / 3), matching final_dim exactly
         bot_pct_lim=[0.0, 0.0],
         rot_lim=[-5.4, 5.4],
         rand_flip=True,
@@ -243,7 +244,7 @@ test_pipeline = [
     dict(
         type='ImageAug3D',
         final_dim=[512, 640],
-        resize_lim=[0.48, 0.48],
+        resize_lim=[1.0, 1.0],  # stored imgs are 640x512, no resize needed
         bot_pct_lim=[0.0, 0.0],
         rot_lim=[0.0, 0.0],
         rand_flip=False,

@@ -2,25 +2,20 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug BEVFusion (single GPU)",
+            "name": "Train DETR3D KL (camera-only)",
             "type": "debugpy",
             "request": "launch",
-
             "program": "${workspaceFolder}/tools/train.py",
-
             "args": [
-                "projects/BEVFusion/configs/bevfusion_cam_resnet_kl.py",
+                "projects/DETR3D/configs/detr3d_r101_gridmask.py",
                 "--launcher", "none",
                 "--amp"
             ],
-
             "console": "integratedTerminal",
-
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "CUDA_VISIBLE_DEVICES": "0"
             },
-
             "justMyCode": false,
             "subProcess": false
         }

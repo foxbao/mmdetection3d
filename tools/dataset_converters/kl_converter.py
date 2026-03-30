@@ -29,7 +29,16 @@ def load_json_if_exists(path: Path):
     with open(path, 'r') as f:
         return json.load(f)
 
-kl_categories = ( "Pedestrian", 
+CAM_NAME_MAP = {
+    'front': 'CAM_FRONT',
+    'left_front': 'CAM_FRONT_LEFT',
+    'left_rear': 'CAM_BACK_LEFT',
+    'rear': 'CAM_BACK',
+    'right_front': 'CAM_FRONT_RIGHT',
+    'right_rear': 'CAM_BACK_RIGHT',
+}
+
+kl_categories = ( "Pedestrian",
                  "Car", 
                  "IGV-Full", 
                  "Truck", 
@@ -145,13 +154,12 @@ def generate_token():
 def get_class_name_from_type(anno_data):
     names = []
     for obj in anno_data:
-        if obj['label'] in kl_categories:
-            names.append(obj['label'])
-        elif obj['subtype'] in kl_categories:
-            names.append(obj['subtype'])
+        cls = obj.get('subtype') or obj.get('label', '')
+        if cls in kl_categories:
+            names.append(cls)
         else:
             names.append('Unknown')
-            print("[Warning] Unknown category:", obj['label'], obj['subtype'])
+            print("[Warning] Unknown category:", obj.get('label'), obj.get('subtype'))
     return names
 
 def get_undist_image_path(img_path: Path):
@@ -226,15 +234,6 @@ def make_yaw_rotation(yaw_deg):
     return R
 
 def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
-    CAM_NAME_MAP = {
-        'front': 'CAM_FRONT',
-        'left_front': 'CAM_FRONT_LEFT',
-        'left_rear': 'CAM_BACK_LEFT',
-        'rear': 'CAM_BACK',
-        'right_front': 'CAM_FRONT_RIGHT',
-        'right_rear': 'CAM_BACK_RIGHT',
-    }
-
     cams = {}
 
     for cam_name in frame_info['used_cameras']:
@@ -409,7 +408,11 @@ def recompute_num_lidar_pts(
 
     # ---------- load points ----------
     # merged bin is 5-dim (x,y,z,intensity,timestamp_2us) from read_pcd_with_intensity()
-    points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+    try:
+        points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+    except ValueError:
+        print(f'[WARNING] cannot reshape lidar file (size not divisible by 5): {lidar_path}')
+        return np.zeros((M,), dtype=np.int32)
     points_xyz = points[:, :3]
 
     if device == 'numpy':
@@ -595,8 +598,10 @@ def process_frame(frame_info):
     info['lidar_path'] = str(merged_file)
 
     # =================== Camera ===================
-    cams = process_cameras(frame_info, frame_id, scale=1.0 / 3.0)
-    if len(cams) != len(frame_info['used_cameras']):
+    scale = frame_info.get('img_scale', 1.0 / 3.0)
+    cams = process_cameras(frame_info, frame_id, scale=scale)
+    expected_cams = [c for c in frame_info['used_cameras'] if c in CAM_NAME_MAP]
+    if len(cams) != len(expected_cams):
         return None
 
     info['cams'] = cams
@@ -659,6 +664,10 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     gt_annotation_filter = None
     if cfg is not None and 'gt_annotation_filter' in cfg:
         gt_annotation_filter = cfg.gt_annotation_filter
+
+    img_scale = 1.0 / 3.0
+    if cfg is not None and hasattr(cfg, 'img_scale'):
+        img_scale = cfg.img_scale
 
     frame_info_list = []
     # lidar_dirs = [p.parent for p in sample_path.rglob("lidar") if p.is_dir()]
@@ -833,7 +842,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
                 'label_ts_list': label_ts_list,
                 'max_diff': max_diff,
                 'coord_transform': coord_transform,
-                'gt_annotation_filter': gt_annotation_filter
+                'gt_annotation_filter': gt_annotation_filter,
+                'img_scale': img_scale,
             })
 
 
@@ -854,7 +864,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     print(f"[Stage 1] cam+lidar process, valid frames: {len(base_infos)}")
     
     # =================== GT ===================
-    all_infos = process_gt_for_infos(base_infos, device='cuda')
+    gt_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    all_infos = process_gt_for_infos(base_infos, device=gt_device)
     print(f"[Stage 2] gt process, final frames: {len(all_infos)}")
     # gt_info = process_gt_annotations(frame_info, frame_id,lidar_path=info['lidar_path'])
     # if gt_info is None:
@@ -877,7 +888,7 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     # for info in all_infos:
     #     validate_img_box(info)
     
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed=42)
     perm = rng.permutation(n)
     split_idx = int(n*0.9)
     train_results = [all_infos[i] for i in perm[:split_idx]]
