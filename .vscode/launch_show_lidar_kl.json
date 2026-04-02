@@ -8,7 +8,7 @@
       "program": "${workspaceFolder}/tools/infer.py",
       "args": [
         "--config","projects/BEVFusion/configs/bevfusion_yx_kl.py",
-        "--checkpoint","work_dirs/bevfusion_yx_kl/epoch_20.pth",
+        "--checkpoint","work_dirs/bevfusion_yx_kl/epoch_7.pth",
       ],
       "env": {
         "PYTHONPATH": "${workspaceFolder}"
