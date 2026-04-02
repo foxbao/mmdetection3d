@@ -151,10 +151,30 @@ def generate_token():
     import uuid
     return str(uuid.uuid4())
 
+def _normalize_optional_str(value):
+    """Normalize string-like class fields from label json."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    value = value.strip()
+    if value == '' or value.lower() in {'none', 'null'}:
+        return None
+    return value
+
+def get_obj_class_name(obj):
+    """Read class name with fallback: subtype -> label -> name."""
+    cls_name = _normalize_optional_str(obj.get('subtype'))
+    if cls_name is None:
+        cls_name = _normalize_optional_str(obj.get('label'))
+    if cls_name is None:
+        cls_name = _normalize_optional_str(obj.get('name'))
+    return cls_name
+
 def get_class_name_from_type(anno_data):
     names = []
     for obj in anno_data:
-        cls = obj.get('subtype') or obj.get('label', '')
+        cls = get_obj_class_name(obj)
         if cls in kl_categories:
             names.append(cls)
         else:
@@ -518,7 +538,7 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
     wheelcrane_boxes = []
 
     for i, ann in enumerate(anno_data):
-        cls_name = ann.get('subtype') or ann.get('name')
+        cls_name = get_obj_class_name(ann)
 
         if cls_name == 'WheelCrane':
             wheelcrane_indices.append(i)
@@ -544,7 +564,7 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
 
         keep_mask = []
         for i, ann in enumerate(anno_data):
-            cls_name = ann.get('subtype') or ann.get('name')
+            cls_name = get_obj_class_name(ann)
             min_req = min_pts_by_cls.get(cls_name, 0)
             keep_mask.append(num_lidar_pts[i] >= min_req)
 
