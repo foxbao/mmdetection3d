@@ -121,6 +121,7 @@ model = dict(
             min_radius=2,
             pos_weight=-1,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
+            pi_symmetric_class_indices=[2, 6, 14],  # IGV-Full, IGV-Empty, WheelCrane
             assigner=dict(
                 type='HungarianAssigner3D',
                 iou_calculator=dict(type='BboxOverlaps3D', coordinate='lidar'),
@@ -286,7 +287,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=8,
+    batch_size=10,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -306,7 +307,7 @@ train_dataloader = dict(
             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
             box_type_3d='LiDAR')))
 val_dataloader = dict(
-    batch_size=1,
+    batch_size=8,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -382,7 +383,7 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=100)
+train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=5)
 val_cfg = dict()
 test_cfg = dict()
 

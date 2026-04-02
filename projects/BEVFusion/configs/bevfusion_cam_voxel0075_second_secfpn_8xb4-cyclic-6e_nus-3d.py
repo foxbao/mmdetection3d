@@ -3,7 +3,7 @@ custom_imports = dict(
     imports=['projects.BEVFusion.bevfusion'], allow_failed_imports=False)
 
 # model settings
-point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
     'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
@@ -67,8 +67,8 @@ model = dict(
         out_channels=80,
         image_size=[256, 704],
         feature_size=[32, 88],
-        xbound=[-54.0, 54.0, 0.3],
-        ybound=[-54.0, 54.0, 0.3],
+        xbound=[-51.2, 51.2, 0.4],
+        ybound=[-51.2, 51.2, 0.4],
         zbound=[-10.0, 10.0, 20.0],
         dbound=[1.0, 60.0, 0.5],
         downsample=2),
@@ -105,18 +105,18 @@ model = dict(
             max_num=500,
             score_threshold=0.1,
             out_size_factor=8,
-            voxel_size=[0.075, 0.075],
+            voxel_size=[0.1, 0.1],
             code_size=9),
         separate_head=dict(
             type='SeparateHead', init_bias=-2.19, final_kernel=3),
         loss_cls=dict(type='mmdet.GaussianFocalLoss', reduction='mean'),
         loss_bbox=dict(
-            type='mmdet.L1Loss', reduction='none', loss_weight=0.25),
+            type='mmdet.L1Loss', reduction='mean', loss_weight=0.25),
         norm_bbox=True,
         train_cfg=dict(
-            point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0],
-            grid_size=[1440, 1440, 40],
-            voxel_size=[0.075, 0.075, 0.2],
+            point_cloud_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0],
+            grid_size=[1024, 1024, 40],
+            voxel_size=[0.1, 0.1, 0.2],
             out_size_factor=8,
             dense_reg=1,
             gaussian_overlap=0.1,
@@ -130,8 +130,11 @@ model = dict(
             min_radius=[4, 12, 10, 1, 0.85, 0.175],
             score_threshold=0.1,
             out_size_factor=8,
-            voxel_size=[0.075, 0.075],
-            nms_type='rotate',
+            voxel_size=[0.1, 0.1],
+            nms_type=['circle', 'rotate', 'rotate',
+                      'circle', 'rotate', 'rotate'],
+            nms_scale=[[1.0], [1.0, 1.0], [1.0, 1.0],
+                       [1.0], [1.0, 1.0], [2.5, 4.0]],
             pre_max_size=1000,
             post_max_size=83,
             nms_thr=0.2)))
@@ -387,6 +390,6 @@ auto_scale_lr = dict(enable=False, base_batch_size=16)
 
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
-    checkpoint=dict(type='CheckpointHook', interval=5))
+    checkpoint=dict(type='CheckpointHook', interval=1))
 
 custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=15)]
