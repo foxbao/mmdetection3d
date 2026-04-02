@@ -859,6 +859,38 @@ class TransFusionHead(nn.Module):
                                               self.num_proposals:(idx_layer +
                                                                   1) *
                                               self.num_proposals, :, ]
+
+            # π-symmetric rotation: for front-back symmetric classes,
+            # flip GT rotation target (θ → θ+π) if it's closer to prediction.
+            # This eliminates contradictory gradients from ambiguous yaw labels.
+            pi_sym_cls = self.train_cfg.get(
+                'pi_symmetric_class_indices', [])
+            if len(pi_sym_cls) > 0:
+                layer_labels_2d = labels[
+                    :, idx_layer * self.num_proposals:
+                    (idx_layer + 1) * self.num_proposals]
+                sym_mask = torch.zeros_like(
+                    layer_labels_2d, dtype=torch.bool)
+                for cls_idx in pi_sym_cls:
+                    sym_mask |= (layer_labels_2d == cls_idx)
+                if sym_mask.any():
+                    pred_sin = preds[:, :, 6].detach()
+                    pred_cos = preds[:, :, 7].detach()
+                    gt_sin = layer_bbox_targets[:, :, 6]
+                    gt_cos = layer_bbox_targets[:, :, 7]
+                    dist_orig = (pred_sin - gt_sin).abs() + \
+                        (pred_cos - gt_cos).abs()
+                    dist_flip = (pred_sin + gt_sin).abs() + \
+                        (pred_cos + gt_cos).abs()
+                    flip_mask = sym_mask & (dist_flip < dist_orig)
+                    layer_bbox_targets = layer_bbox_targets.clone()
+                    layer_bbox_targets[:, :, 6] = torch.where(
+                        flip_mask, -layer_bbox_targets[:, :, 6],
+                        layer_bbox_targets[:, :, 6])
+                    layer_bbox_targets[:, :, 7] = torch.where(
+                        flip_mask, -layer_bbox_targets[:, :, 7],
+                        layer_bbox_targets[:, :, 7])
+
             layer_loss_bbox = self.loss_bbox(
                 preds,
                 layer_bbox_targets,

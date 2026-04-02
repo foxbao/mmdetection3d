@@ -33,8 +33,106 @@ import pickle
 import tqdm
 from mmdet3d.datasets.kl_dataset import KlDataset
 from easydict import EasyDict as edict
-from nuscenes.eval.common.utils import center_distance
+from nuscenes.eval.common.utils import center_distance, yaw_diff, \
+    velocity_l2, scale_iou, attr_acc, cummean
+from nuscenes.eval.detection.data_classes import DetectionMetricData
 from collections import defaultdict
+
+# Classes with front-back symmetry: orientation is only determined up to 180°.
+PI_SYMMETRIC_CLASSES = {'IGV-Full', 'IGV-Empty', 'WheelCrane'}
+
+
+def accumulate_pi_symmetric(gt_boxes, pred_boxes, class_name, dist_fcn,
+                            dist_th, verbose=False):
+    """Same as nuscenes accumulate(), but uses period=π for orient_err
+    on classes with front-back symmetry (PI_SYMMETRIC_CLASSES)."""
+
+    npos = len([1 for gt_box in gt_boxes.all
+                if gt_box.detection_name == class_name])
+    if npos == 0:
+        return DetectionMetricData.no_predictions()
+
+    pred_boxes_list = [box for box in pred_boxes.all
+                       if box.detection_name == class_name]
+    pred_confs = [box.detection_score for box in pred_boxes_list]
+    sortind = [i for (v, i) in sorted(
+        (v, i) for (i, v) in enumerate(pred_confs))][::-1]
+
+    tp = []
+    fp = []
+    conf = []
+    match_data = {'trans_err': [], 'vel_err': [], 'scale_err': [],
+                  'orient_err': [], 'attr_err': [], 'conf': []}
+
+    # Use period=π for barrier and pi-symmetric classes
+    if class_name in PI_SYMMETRIC_CLASSES or class_name == 'barrier':
+        orient_period = np.pi
+    else:
+        orient_period = 2 * np.pi
+
+    taken = set()
+    for ind in sortind:
+        pred_box = pred_boxes_list[ind]
+        min_dist = np.inf
+        match_gt_idx = None
+        for gt_idx, gt_box in enumerate(gt_boxes[pred_box.sample_token]):
+            if (gt_box.detection_name == class_name
+                    and (pred_box.sample_token, gt_idx) not in taken):
+                this_distance = dist_fcn(gt_box, pred_box)
+                if this_distance < min_dist:
+                    min_dist = this_distance
+                    match_gt_idx = gt_idx
+
+        is_match = min_dist < dist_th
+        if is_match:
+            taken.add((pred_box.sample_token, match_gt_idx))
+            tp.append(1)
+            fp.append(0)
+            conf.append(pred_box.detection_score)
+            gt_box_match = gt_boxes[pred_box.sample_token][match_gt_idx]
+            match_data['trans_err'].append(
+                center_distance(gt_box_match, pred_box))
+            match_data['vel_err'].append(
+                velocity_l2(gt_box_match, pred_box))
+            match_data['scale_err'].append(
+                1 - scale_iou(gt_box_match, pred_box))
+            match_data['orient_err'].append(
+                yaw_diff(gt_box_match, pred_box, period=orient_period))
+            match_data['attr_err'].append(
+                1 - attr_acc(gt_box_match, pred_box))
+            match_data['conf'].append(pred_box.detection_score)
+        else:
+            tp.append(0)
+            fp.append(1)
+            conf.append(pred_box.detection_score)
+
+    if len(match_data['trans_err']) == 0:
+        return DetectionMetricData.no_predictions()
+
+    tp = np.cumsum(tp).astype(float)
+    fp = np.cumsum(fp).astype(float)
+    conf = np.array(conf)
+    prec = tp / (fp + tp)
+    rec = tp / float(npos)
+    rec_interp = np.linspace(0, 1, DetectionMetricData.nelem)
+    prec = np.interp(rec_interp, rec, prec, right=0)
+    conf = np.interp(rec_interp, rec, conf, right=0)
+    rec = rec_interp
+
+    for key in match_data.keys():
+        if key == 'conf':
+            continue
+        tmp = cummean(np.array(match_data[key]))
+        match_data[key] = np.interp(
+            conf[::-1], match_data['conf'][::-1], tmp[::-1])[::-1]
+
+    return DetectionMetricData(
+        recall=rec, precision=prec, confidence=conf,
+        trans_err=match_data['trans_err'],
+        vel_err=match_data['vel_err'],
+        scale_err=match_data['scale_err'],
+        orient_err=match_data['orient_err'],
+        attr_err=match_data['attr_err'])
 
 class KlDevConfig:
     CLASS_MAPPING = KlDataset.METAINFO['classes']
@@ -48,7 +146,8 @@ class KlDevConfig:
                  min_recall: float,
                  min_precision: float,
                  max_boxes_per_sample: int,
-                 mean_ap_weight: int):
+                 mean_ap_weight: int,
+                 point_cloud_range: Optional[List[float]] = None):
         # 找出在 class_range 中但不在 KlDataset 中的类
         extra = set(class_range.keys()) - set(KlDataset.METAINFO['classes'])
         # 找出在 KlDataset 中但不在 class_range 中的类
@@ -65,6 +164,7 @@ class KlDevConfig:
         self.min_precision = min_precision
         self.max_boxes_per_sample = max_boxes_per_sample
         self.mean_ap_weight = mean_ap_weight
+        self.point_cloud_range = point_cloud_range
 
         self.class_names = self.class_range.keys()
 
@@ -84,7 +184,8 @@ class KlDevConfig:
             'min_recall': self.min_recall,
             'min_precision': self.min_precision,
             'max_boxes_per_sample': self.max_boxes_per_sample,
-            'mean_ap_weight': self.mean_ap_weight
+            'mean_ap_weight': self.mean_ap_weight,
+            'point_cloud_range': self.point_cloud_range
         }
 
     @classmethod
@@ -97,7 +198,8 @@ class KlDevConfig:
                    content['min_recall'],
                    content['min_precision'],
                    content['max_boxes_per_sample'],
-                   content['mean_ap_weight'])
+                   content['mean_ap_weight'],
+                   content.get('point_cloud_range'))
 
     @property
     def dist_fcn_callable(self):
@@ -244,6 +346,7 @@ class KlDevKit:
         'mean_ap_weight': 5,
         'min_precision': 0.1,
         'min_recall': 0.1,
+        'point_cloud_range': None,
     })
 
     def __init__(self, dataroot: str, mode: str = 'train'):
@@ -264,8 +367,17 @@ class KlDevKit:
     def filter_eval_boxes(self, 
                           eval_boxes: EvalBoxes,
                           max_dist: Dict[str, float],
+                          point_cloud_range: Optional[List[float]] = None,
                           verbose: bool = False) -> EvalBoxes:
         class_field = 'detection_name'
+
+        def in_point_cloud_range(box: EvalBox) -> bool:
+            if point_cloud_range is None:
+                return True
+            x, y, z = box.translation
+            return (point_cloud_range[0] <= x <= point_cloud_range[3]
+                    and point_cloud_range[1] <= y <= point_cloud_range[4]
+                    and point_cloud_range[2] <= z <= point_cloud_range[5])
 
         # Accumulators for number of filtered boxes.
         total, dist_filter, point_filter, bike_rack_filter = 0, 0, 0, 0
@@ -273,8 +385,16 @@ class KlDevKit:
 
             # Filter on distance first.
             total += len(eval_boxes[sample_token])
-            eval_boxes.boxes[sample_token] = [box for box in eval_boxes[sample_token] if
-                                            box.ego_dist < max_dist[box.__getattribute__(class_field)]]
+            if point_cloud_range is None:
+                eval_boxes.boxes[sample_token] = [
+                    box for box in eval_boxes[sample_token]
+                    if box.ego_dist < max_dist[box.__getattribute__(class_field)]
+                ]
+            else:
+                eval_boxes.boxes[sample_token] = [
+                    box for box in eval_boxes[sample_token]
+                    if in_point_cloud_range(box)
+                ]
             dist_filter += len(eval_boxes[sample_token])
 
             # Then remove boxes with zero points in them. Eval boxes have -1 points by default.
@@ -438,10 +558,18 @@ class KlDetectionEval:
         # Filter boxes (distance, points per box, etc.).
         if verbose:
             print('Filtering predictions')
-        self.pred_boxes = self.klDevKit.filter_eval_boxes(self.pred_boxes, self.cfg.class_range, verbose=verbose)
+        self.pred_boxes = self.klDevKit.filter_eval_boxes(
+            self.pred_boxes,
+            self.cfg.class_range,
+            point_cloud_range=self.cfg.point_cloud_range,
+            verbose=verbose)
         if verbose:
             print('Filtering ground truth annotations')
-        self.gt_boxes = self.klDevKit.filter_eval_boxes(self.gt_boxes, self.cfg.class_range, verbose=verbose)
+        self.gt_boxes = self.klDevKit.filter_eval_boxes(
+            self.gt_boxes,
+            self.cfg.class_range,
+            point_cloud_range=self.cfg.point_cloud_range,
+            verbose=verbose)
 
         self.sample_tokens = self.gt_boxes.sample_tokens
     
@@ -452,7 +580,7 @@ class KlDetectionEval:
         for class_name in self.cfg.class_names:
             for dist_th in self.cfg.dist_ths:
                 callable = center_distance if self.cfg.dist_fcn == 'center_distance' else self.cfg.dist_fcn_callable
-                md = accumulate(self.gt_boxes, self.pred_boxes, class_name, callable, dist_th)
+                md = accumulate_pi_symmetric(self.gt_boxes, self.pred_boxes, class_name, callable, dist_th)
                 metric_data_list.set(class_name, dist_th, md)
         metrics = KlDetectionMetrics(self.cfg)
         for class_name in self.cfg.class_names:
@@ -591,6 +719,9 @@ class KlMetric(BaseMetric):
                  ann_file: str,
                  metric: Union[str, List[str]] = 'bbox',
                  modality: dict = dict(use_camera=False, use_lidar=True),
+                 detect_range: Optional[float] = None,
+                 class_range: Optional[Dict[str, float]] = None,
+                 point_cloud_range: Optional[List[float]] = None,
                  prefix: Optional[str] = None,
                  format_only: bool = False,
                  jsonfile_prefix: Optional[str] = None,
@@ -622,15 +753,24 @@ class KlMetric(BaseMetric):
         self.eval_version = eval_version
         # self.eval_detection_configs = config_factory(self.eval_version)
         kldevconfig_info = KlDevKit.KLDEVKIT_CONFIG
+        if class_range is None:
+            if detect_range is None:
+                class_range = kldevconfig_info.class_range
+            else:
+                class_range = {
+                    class_name: detect_range
+                    for class_name in KlDevConfig.CLASS_MAPPING
+                }
         self.eval_detection_configs = KlDevConfig(
-            class_range=kldevconfig_info.class_range,
+            class_range=class_range,
             dist_fcn=kldevconfig_info.dist_fcn,
             dist_ths=kldevconfig_info.dist_ths,
             dist_th_tp=kldevconfig_info.dist_th_tp,
             min_recall=kldevconfig_info.min_recall,
             min_precision=kldevconfig_info.min_precision,
             max_boxes_per_sample=kldevconfig_info.max_boxes_per_sample,
-            mean_ap_weight=kldevconfig_info.mean_ap_weight
+            mean_ap_weight=kldevconfig_info.mean_ap_weight,
+            point_cloud_range=point_cloud_range
         )
 
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:
