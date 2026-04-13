@@ -287,7 +287,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=10,
+    batch_size=8,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -331,6 +331,10 @@ val_evaluator = dict(
     data_root=data_root,
     ann_file=data_root + 'kl_infos_val.pkl',
     metric='bbox',
+    point_cloud_range=point_cloud_range,
+    # Front-back symmetric classes: orientation evaluated mod π.
+    # Must stay in sync with bbox_head.train_cfg.pi_symmetric_class_indices.
+    pi_symmetric_classes=['IGV-Full', 'IGV-Empty', 'WheelCrane'],
     backend_args=backend_args)
 test_evaluator = val_evaluator
 
@@ -344,7 +348,7 @@ param_scheduler = [
     # learning rate scheduler
     # During the first 8 epochs, learning rate increases from 0 to lr * 10
     # during the next 12 epochs, learning rate decreases from lr * 10 to
-    # lr * 1e-4
+    # lr * 1e-2 (minimum lr = 1e-6, NOT near-zero)
     dict(
         type='CosineAnnealingLR',
         T_max=8,
@@ -356,7 +360,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         T_max=12,
-        eta_min=lr * 1e-4,
+        eta_min=lr * 1e-2,
         begin=8,
         end=20,
         by_epoch=True,
@@ -390,7 +394,7 @@ test_cfg = dict()
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=lr, weight_decay=0.01),
-    clip_grad=dict(max_norm=35, norm_type=2))
+    clip_grad=dict(max_norm=1, norm_type=2))
 
 # Default setting for scaling LR automatically
 #   - `enable` means enable scaling LR automatically

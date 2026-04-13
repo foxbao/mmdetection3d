@@ -1,20 +1,17 @@
 """BEVFusion camera-only config for KL dataset.
 
-Based on the working NuScenes config (bevfusion_cam_voxel0075_..._nus-3d.py).
-Only changed what is necessary for the KL dataset:
-  - Dataset type, paths, class names, task heads
-  - Image size: KL stores 640x512 (pre-resized from 1920x1536)
-  - No multi-sweep (KL has single-frame LiDAR only)
-  - No velocity annotations → vel code_weights zeroed
-  - Backbone: ResNet50 (vs NuScenes Swin-T), to handle larger 512x640 images
-  - Spatial range narrowed for short-range camera debug: x ±48m, y ±64m
+This variant is tuned to be more camera-only friendly on KL:
+  - Removes LiDAR DB sampling that can desync image evidence from GT boxes
+  - Keeps only image/box-aligned augmentation and range filtering
+  - Splits the least natural grouped task: OtherVehicle vs ConstructionVehicle
+  - Warm-starts from the trained NuScenes camera-only checkpoint
 
 Spatial chain:
-  xbound [-48, 48, 0.4], ybound [-64, 64, 0.4] → BEV 240x320
-  DepthLSSTransform downsample=2 → 120x160
-  GeneralizedResNet: 120x160 → 60x80 → 30x40 → 30x40
-  LSSFPN scale_factor=4 → 120x160
-  CenterHead: grid [960, 1280] / out_factor 8 = 120x160 ✓
+  xbound [-48, 48, 0.4], ybound [-48, 48, 0.4] → BEV 240x240
+  LSSTransform downsample=2 → 120x120
+  GeneralizedResNet: 120x120 → 60x60 → 30x30 → 30x30
+  LSSFPN scale_factor=4 → 120x120
+  CenterHead: grid [960, 960] / out_factor 8 = 120x120 ✓
 """
 
 _base_ = ['../../../configs/_base_/default_runtime.py']
@@ -22,7 +19,12 @@ custom_imports = dict(
     imports=['projects.BEVFusion.bevfusion'], allow_failed_imports=False)
 
 # ---- KL dataset ----
-point_cloud_range = [-48.0, -64.0, -2.0, 48.0, 64.0, 6.0]
+# NOTE: BEV must be SQUARE (X cells == Y cells). BEVFusion's LSS
+# view_transform produces a BEV in (X, Y) layout, while CenterHead's heatmap
+# target is (Y, X). NuScenes hides the bug because xbound==ybound. We
+# temporarily side-step the issue by using a square ±48m range; the proper
+# (X, Y) vs (Y, X) fix is TBD.
+point_cloud_range = [-48.0, -48.0, -2.0, 48.0, 48.0, 6.0]
 class_names = [
     'Pedestrian', 'Car', 'IGV-Full', 'Truck', 'Trailer-Empty',
     'Trailer-Full', 'IGV-Empty', 'Crane', 'OtherVehicle', 'Cone',
@@ -47,22 +49,31 @@ model = dict(
         mean=[123.675, 116.28, 103.53],
         std=[58.395, 57.12, 57.375],
         bgr_to_rgb=False),
-    # ResNet50 instead of Swin-T: KL images are 512x640 (larger than NuScenes 256x704)
+    # Swin-T (matches the MIT camera-only config). 512x640 is fine
+    # for Swin-T as long as H/W are multiples of 32 (window_size=7, patch=4).
     img_backbone=dict(
-        type='mmdet.ResNet',
-        depth=50,
-        num_stages=4,
-        out_indices=(1, 2, 3),
-        frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=True),
-        norm_eval=False,
-        style='pytorch',
+        type='mmdet.SwinTransformer',
+        embed_dims=96,
+        depths=[2, 2, 6, 2],
+        num_heads=[3, 6, 12, 24],
+        window_size=7,
+        mlp_ratio=4,
+        qkv_bias=True,
+        qk_scale=None,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        drop_path_rate=0.2,
+        patch_norm=True,
+        out_indices=[1, 2, 3],
+        with_cp=False,
+        convert_weights=True,
         init_cfg=dict(
             type='Pretrained',
-            checkpoint='torchvision://resnet50')),
+            checkpoint='https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth'  # noqa: E501
+        )),
     img_neck=dict(
         type='GeneralizedLSSFPN',
-        in_channels=[512, 1024, 2048],  # ResNet50 channels (vs Swin [192,384,768])
+        in_channels=[192, 384, 768],  # Swin-T stage 1/2/3 channels
         out_channels=256,
         start_level=0,
         num_outs=3,
@@ -70,13 +81,13 @@ model = dict(
         act_cfg=dict(type='ReLU', inplace=True),
         upsample_cfg=dict(mode='bilinear', align_corners=False)),
     view_transform=dict(
-        type='DepthLSSTransform',
+        type='LSSTransform',
         in_channels=256,
         out_channels=80,
         image_size=[512, 640],    # KL stored image size
         feature_size=[64, 80],    # image_size / backbone_stride(8)
         xbound=[-48.0, 48.0, 0.4],
-        ybound=[-64.0, 64.0, 0.4],
+        ybound=[-48.0, 48.0, 0.4],
         zbound=[-10.0, 10.0, 20.0],
         dbound=[1.0, 60.0, 0.5],
         downsample=2),
@@ -91,7 +102,8 @@ model = dict(
         in_indices=[-1, 0],
         out_channels=256,
         scale_factor=4),
-    # CenterHead: 10 task heads for 15 KL classes (grouped by shape/size)
+    # CenterHead: 11 task heads for 15 KL classes.
+    # Only split the least natural pair to reduce cross-class interference.
     bbox_head=dict(
         type='CenterHead',
         in_channels=256,
@@ -102,7 +114,8 @@ model = dict(
             dict(num_class=2, class_names=['Truck', 'Lorry']),
             dict(num_class=2, class_names=['Trailer-Empty', 'Trailer-Full']),
             dict(num_class=1, class_names=['Crane']),
-            dict(num_class=2, class_names=['OtherVehicle', 'ConstructionVehicle']),
+            dict(num_class=1, class_names=['OtherVehicle']),
+            dict(num_class=1, class_names=['ConstructionVehicle']),
             dict(num_class=2, class_names=['ContainerForklift', 'Forklift']),
             dict(num_class=1, class_names=['Cone']),
             dict(num_class=1, class_names=['WheelCrane']),
@@ -113,7 +126,7 @@ model = dict(
         bbox_coder=dict(
             type='CenterPointBBoxCoder',
             pc_range=point_cloud_range,
-            post_center_range=[-55.0, -72.0, -10.0, 55.0, 72.0, 10.0],
+            post_center_range=[-55.0, -55.0, -10.0, 55.0, 55.0, 10.0],
             max_num=500,
             score_threshold=0.1,
             out_size_factor=8,
@@ -127,7 +140,7 @@ model = dict(
         norm_bbox=True,
         train_cfg=dict(
             point_cloud_range=point_cloud_range,
-            grid_size=[960, 1280, 40],
+            grid_size=[960, 960, 40],
             voxel_size=[0.1, 0.1, 0.2],
             out_size_factor=8,
             dense_reg=1,
@@ -137,66 +150,30 @@ model = dict(
             # KL has NO velocity → zero out vel loss weights
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]),
         test_cfg=dict(
-            post_center_limit_range=[-55.0, -72.0, -10.0, 55.0, 72.0, 10.0],
+            post_center_limit_range=[-55.0, -55.0, -10.0, 55.0, 55.0, 10.0],
             max_per_img=500,
             max_pool_nms=False,
-            # per-task min_radius: sized by object footprint
-            # Ped, Car, IGV, Truck, Trailer, Crane, Other, Forklift, Cone, WheelCrane
-            min_radius=[1, 4, 8, 10, 12, 10, 8, 4, 0.5, 10],
+            # Ped, Car, IGV, Truck, Trailer, Crane, Other, Construction,
+            # Forklift, Cone, WheelCrane
+            min_radius=[1, 4, 8, 10, 12, 10, 8, 10, 4, 0.5, 10],
             score_threshold=0.1,
             out_size_factor=8,
             voxel_size=[0.1, 0.1],
-            # per-task NMS type (ref NuScenes YAML)
             nms_type=['circle', 'rotate', 'rotate', 'rotate', 'rotate',
-                      'rotate', 'rotate', 'rotate', 'circle', 'rotate'],
+                      'rotate', 'rotate', 'rotate', 'rotate', 'circle',
+                      'rotate'],
             nms_scale=[[2.5], [1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0],
-                       [1.0], [1.0, 1.0], [1.0, 1.0], [2.5], [1.0]],
+                       [1.0], [1.0], [1.0], [1.0, 1.0], [2.5], [1.0]],
             pre_max_size=1000,
             post_max_size=200,
             nms_thr=0.2)))
 
-# ---- ObjectSample (same structure as NuScenes) ----
-db_sampler = dict(
-    data_root=data_root,
-    info_path=data_root + 'kl_dbinfos_train.pkl',
-    rate=1.0,
-    prepare=dict(
-        filter_by_difficulty=[-1],
-        filter_by_min_points={
-            'Pedestrian': 10, 'Car': 50, 'IGV-Full': 50, 'Truck': 50,
-            'Trailer-Empty': 50, 'Trailer-Full': 50, 'IGV-Empty': 50,
-            'Crane': 50, 'OtherVehicle': 50, 'Cone': 10,
-            'ContainerForklift': 50, 'Forklift': 50, 'Lorry': 50,
-            'ConstructionVehicle': 50, 'WheelCrane': 100
-        }),
-    classes=class_names,
-    sample_groups={
-        'Pedestrian': 5, 'Car': 5, 'IGV-Full': 5, 'Truck': 5,
-        'Trailer-Empty': 5, 'Trailer-Full': 5, 'IGV-Empty': 5,
-        'Crane': 5, 'OtherVehicle': 0, 'Cone': 5,
-        'ContainerForklift': 5, 'Forklift': 1, 'Lorry': 1,
-        'ConstructionVehicle': 5, 'WheelCrane': 1
-    },
-    points_loader=dict(
-        type='LoadPointsFromFile',
-        coord_type='LIDAR',
-        load_dim=5,
-        use_dim=[0, 1, 2, 3],
-        backend_args=backend_args))
-
 # ---- Pipelines ----
 # KL differences from NuScenes:
 #   - No LoadPointsFromMultiSweeps (KL has single frame only)
-#   - LiDAR: load_dim=5 use_dim=4 (x,y,z,intensity)
-#   - ImageAug3D: final_dim=[512,640], resize_lim=[0.9,1.1]
-#     (KL images already stored at 640x512, mild augmentation)
+#   - No ObjectSample: camera-only training should avoid GT/image mismatch
+#   - Keep 3D box transforms and range/name filtering only
 train_pipeline = [
-    dict(
-        type='LoadPointsFromFile',
-        coord_type='LIDAR',
-        load_dim=5,
-        use_dim=4,
-        backend_args=backend_args),
     dict(
         type='BEVLoadMultiViewImageFromFiles',
         to_float32=True,
@@ -207,7 +184,6 @@ train_pipeline = [
         with_bbox_3d=True,
         with_label_3d=True,
         with_attr_label=False),
-    dict(type='ObjectSample', db_sampler=db_sampler),
     dict(
         type='ImageAug3D',
         final_dim=[512, 640],
@@ -222,13 +198,11 @@ train_pipeline = [
         rot_range=[-0.3925, 0.3925],
         translation_std=0),
     dict(type='BEVFusionRandomFlip3D'),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
-    dict(type='PointShuffle'),
     dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],
+        keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'],
         meta_keys=[
             'cam2img', 'ori_cam2img', 'lidar2cam', 'lidar2img', 'cam2lidar',
             'ori_lidar2img', 'img_aug_matrix', 'box_type_3d', 'sample_idx',
@@ -244,12 +218,6 @@ test_pipeline = [
         color_type='color',
         backend_args=backend_args),
     dict(
-        type='LoadPointsFromFile',
-        coord_type='LIDAR',
-        load_dim=5,
-        use_dim=4,
-        backend_args=backend_args),
-    dict(
         type='ImageAug3D',
         final_dim=[512, 640],
         resize_lim=[1.0, 1.0],
@@ -258,11 +226,8 @@ test_pipeline = [
         rand_flip=False,
         is_train=False),
     dict(
-        type='PointsRangeFilter',
-        point_cloud_range=point_cloud_range),
-    dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],
+        keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'],
         meta_keys=[
             'cam2img', 'ori_cam2img', 'lidar2cam', 'lidar2img', 'cam2lidar',
             'ori_lidar2img', 'img_aug_matrix', 'box_type_3d', 'sample_idx',
@@ -271,8 +236,9 @@ test_pipeline = [
 ]
 
 # ---- Dataloaders (same structure as NuScenes) ----
+# batch_size=1: square 160x160 BEV + Swin-T + 24G GPU is tight; OOMs at 2.
 train_dataloader = dict(
-    batch_size=3,
+    batch_size=2,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -291,7 +257,7 @@ train_dataloader = dict(
             box_type_3d='LiDAR')))
 
 val_dataloader = dict(
-    batch_size=1,
+    batch_size=2,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -316,6 +282,9 @@ val_evaluator = dict(
     ann_file=data_root + 'kl_infos_val.pkl',
     point_cloud_range=point_cloud_range,
     metric='bbox',
+    # Front-back symmetric classes: orientation evaluated mod π.
+    # Must stay in sync with bbox_head.train_cfg.pi_symmetric_class_indices.
+    pi_symmetric_classes=['IGV-Full', 'IGV-Empty', 'WheelCrane'],
     backend_args=backend_args)
 
 test_evaluator = val_evaluator
@@ -327,8 +296,11 @@ vis_backends = [
 visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 
-# ---- Optimizer (from NuScenes, clip_grad lowered to 5 for stability) ----
-lr = 0.001
+# ---- Optimizer ----
+# lr lowered from 1e-3 → 2e-4 to match DETR3D camera-only stable setting.
+# 1e-3 was inherited from NuScenes LiDAR-fusion training (large effective
+# batch); for camera-only from ImageNet init it diverges / underfits.
+lr = 2e-4
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=lr, weight_decay=0.01),
@@ -386,5 +358,11 @@ default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
     checkpoint=dict(type='CheckpointHook', interval=1, save_last=True))
 
-# Disable ObjectSample at 75% of training (NuScenes: epoch 15/50=30%, here: 18/24=75%)
-custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=18)]
+# No ObjectSample hook: the train pipeline is already camera-only friendly.
+custom_hooks = []
+
+# ---- Pretrained init ----
+# Use the trained NuScenes camera-only model as initialization, but strip
+# view_transform.{dx,bx,nx,frustum} so NuScenes' 128x128 BEV grid does not
+# overwrite KL's configured 120x120 grid.
+# load_from = 'work_dirs/bevfusion_cam_swint_lss_nus/epoch_10_for_kl.pth'

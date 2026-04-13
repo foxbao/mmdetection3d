@@ -63,6 +63,16 @@ def _expand_nms_scales(
     return nms_scales
 
 
+def _limit_max_per_img(bboxes, scores: Tensor, labels: Tensor,
+                       max_per_img: Optional[int]):
+    """Keep only the top-scoring predictions after merging all tasks."""
+    if max_per_img is None or len(scores) <= max_per_img:
+        return bboxes, scores, labels
+
+    _, topk_inds = scores.topk(max_per_img)
+    return bboxes[topk_inds], scores[topk_inds], labels[topk_inds]
+
+
 @MODELS.register_module()
 class SeparateHead(BaseModule):
     """SeparateHead for CenterHead.
@@ -521,7 +531,10 @@ class CenterHead(BaseModule):
         pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
         voxel_size = torch.tensor(self.train_cfg['voxel_size'])
 
-        feature_map_size = grid_size[:2] // self.train_cfg['out_size_factor']
+        feature_map_size = torch.div(
+            grid_size[:2],
+            self.train_cfg['out_size_factor'],
+            rounding_mode='trunc')
 
         # reorganize the gt_dict by tasks
         task_masks = []
@@ -852,6 +865,8 @@ class CenterHead(BaseModule):
                         rets[j][i][k] += flag
                         flag += num_class
                     labels = torch.cat([ret[i][k].int() for ret in rets])
+            bboxes, scores, labels = _limit_max_per_img(
+                bboxes, scores, labels, self.test_cfg.get('max_per_img'))
             temp_instances.bboxes_3d = bboxes
             temp_instances.scores_3d = scores
             temp_instances.labels_3d = labels

@@ -34,7 +34,7 @@ class DisableObjectSampleHook(Hook):
         # TODO: refactor after mmengine using model wrapper
         if is_model_wrapper(model):
             model = model.module
-        if epoch == self.disable_after_epoch:
+        if epoch >= self.disable_after_epoch:
             runner.logger.info('Disable ObjectSample')
             dataset = runner.train_dataloader.dataset
             # handle dataset wrapper

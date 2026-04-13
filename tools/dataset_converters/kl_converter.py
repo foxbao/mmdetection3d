@@ -733,7 +733,23 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
             sensor_name_clean = sensor_name.split(lidar_prefix)[-1]
             used_lidars.append(sensor_name_clean)
             extrinsics_dict[sensor_name_clean] = quat
-            
+
+        # ==========================================================
+        # ✅ lidar_selection（作用在 lidar_name 层）
+        # ==========================================================
+        lidar_selection = None
+        if cfg is not None and hasattr(cfg, 'lidar_selection'):
+            lidar_selection = cfg.lidar_selection
+
+        if lidar_selection and lidar_selection.get('enable', False):
+            selected = set(lidar_selection.get('use_lidars', []))
+            used_lidars = [l for l in used_lidars if l in selected]
+            extrinsics_dict = {
+                l: v for l, v in extrinsics_dict.items()
+                if l in selected
+            }
+        # ==========================================================
+
         # ---------- camera 外参 & 内参（可选） ----------
         used_cameras = []
         camera_extrinsics_dict = {}

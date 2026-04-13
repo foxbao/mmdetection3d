@@ -21,12 +21,11 @@ gt_annotation_filter = dict(
 
 
 lidar_selection = dict(
-    enable=False,
+    enable=True,
     use_lidars=[
         "bp_front_left", "bp_front_right",
         "bp_rear_left", "bp_rear_right",
-        "helios_front_left", "helios_rear_right",
-        "m1_front", "m1_rear"
+        "helios_front_left", "helios_rear_right"
     ]
 )
 
@@ -41,14 +40,3 @@ camera_selection = dict(
         "right_rear"
     ]
 )
-
-# gt_box_clamp = dict(
-#     enable=True,
-#     by_class={
-#         "WheelCrane": dict(
-#             z=dict(
-#                 max=4.0
-#             )
-#         )
-#     }
-# )

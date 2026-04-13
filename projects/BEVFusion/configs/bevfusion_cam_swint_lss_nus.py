@@ -1,3 +1,6 @@
+# Camera-only BEVFusion config with Swin-T + LSSTransform on NuScenes.
+# Renamed from bevfusion_cam_voxel0075_second_secfpn_8xb4-cyclic-6e_nus-3d.py
+# to make the camera-only LSS setting explicit.
 _base_ = ['../../../configs/_base_/default_runtime.py']
 custom_imports = dict(
     imports=['projects.BEVFusion.bevfusion'], allow_failed_imports=False)
@@ -122,7 +125,9 @@ model = dict(
             gaussian_overlap=0.1,
             max_objs=500,
             min_radius=2,
-            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]),
+            code_weights=[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2
+            ]),
         test_cfg=dict(
             post_center_limit_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
             max_per_img=500,
@@ -299,7 +304,7 @@ train_dataloader = dict(
             box_type_3d='LiDAR')))
 
 val_dataloader = dict(
-    batch_size=1,
+    batch_size=6,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,

@@ -159,7 +159,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=4,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -181,7 +181,7 @@ train_dataloader = dict(
             backend_args=backend_args)))
 
 val_dataloader = dict(
-    batch_size=1,
+    batch_size=4,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -206,6 +206,10 @@ val_evaluator = dict(
     data_root=data_root,
     ann_file=data_root + 'kl_infos_val.pkl',
     metric='bbox',
+    # Front-back symmetric classes: orientation evaluated mod π.
+    # Must stay in sync with bbox_head.train_cfg.pi_symmetric_class_indices
+    # if that config has it set.
+    pi_symmetric_classes=['IGV-Full', 'IGV-Empty', 'WheelCrane'],
     backend_args=backend_args)
 test_evaluator = val_evaluator
 

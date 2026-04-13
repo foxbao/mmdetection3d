@@ -38,14 +38,21 @@ from nuscenes.eval.common.utils import center_distance, yaw_diff, \
 from nuscenes.eval.detection.data_classes import DetectionMetricData
 from collections import defaultdict
 
-# Classes with front-back symmetry: orientation is only determined up to 180°.
-PI_SYMMETRIC_CLASSES = {'IGV-Full', 'IGV-Empty', 'WheelCrane'}
-
-
 def accumulate_pi_symmetric(gt_boxes, pred_boxes, class_name, dist_fcn,
-                            dist_th, verbose=False):
+                            dist_th, pi_symmetric_classes=None, verbose=False):
     """Same as nuscenes accumulate(), but uses period=π for orient_err
-    on classes with front-back symmetry (PI_SYMMETRIC_CLASSES)."""
+    on classes with front-back symmetry.
+
+    Args:
+        pi_symmetric_classes: iterable of class names whose orientation
+            should be evaluated modulo π (front-back symmetric). 'barrier'
+            is always treated as π-symmetric for nuScenes compatibility.
+            If None, no class is treated as π-symmetric (except 'barrier').
+    """
+    if pi_symmetric_classes is None:
+        pi_symmetric_classes = set()
+    else:
+        pi_symmetric_classes = set(pi_symmetric_classes)
 
     npos = len([1 for gt_box in gt_boxes.all
                 if gt_box.detection_name == class_name])
@@ -65,7 +72,7 @@ def accumulate_pi_symmetric(gt_boxes, pred_boxes, class_name, dist_fcn,
                   'orient_err': [], 'attr_err': [], 'conf': []}
 
     # Use period=π for barrier and pi-symmetric classes
-    if class_name in PI_SYMMETRIC_CLASSES or class_name == 'barrier':
+    if class_name in pi_symmetric_classes or class_name == 'barrier':
         orient_period = np.pi
     else:
         orient_period = 2 * np.pi
@@ -147,7 +154,8 @@ class KlDevConfig:
                  min_precision: float,
                  max_boxes_per_sample: int,
                  mean_ap_weight: int,
-                 point_cloud_range: Optional[List[float]] = None):
+                 point_cloud_range: Optional[List[float]] = None,
+                 pi_symmetric_classes: Optional[List[str]] = None):
         # 找出在 class_range 中但不在 KlDataset 中的类
         extra = set(class_range.keys()) - set(KlDataset.METAINFO['classes'])
         # 找出在 KlDataset 中但不在 class_range 中的类
@@ -165,6 +173,8 @@ class KlDevConfig:
         self.max_boxes_per_sample = max_boxes_per_sample
         self.mean_ap_weight = mean_ap_weight
         self.point_cloud_range = point_cloud_range
+        self.pi_symmetric_classes = list(pi_symmetric_classes) \
+            if pi_symmetric_classes is not None else []
 
         self.class_names = self.class_range.keys()
 
@@ -185,7 +195,8 @@ class KlDevConfig:
             'min_precision': self.min_precision,
             'max_boxes_per_sample': self.max_boxes_per_sample,
             'mean_ap_weight': self.mean_ap_weight,
-            'point_cloud_range': self.point_cloud_range
+            'point_cloud_range': self.point_cloud_range,
+            'pi_symmetric_classes': self.pi_symmetric_classes
         }
 
     @classmethod
@@ -199,7 +210,8 @@ class KlDevConfig:
                    content['min_precision'],
                    content['max_boxes_per_sample'],
                    content['mean_ap_weight'],
-                   content.get('point_cloud_range'))
+                   content.get('point_cloud_range'),
+                   content.get('pi_symmetric_classes'))
 
     @property
     def dist_fcn_callable(self):
@@ -347,6 +359,7 @@ class KlDevKit:
         'min_precision': 0.1,
         'min_recall': 0.1,
         'point_cloud_range': None,
+        'pi_symmetric_classes': [],
     })
 
     def __init__(self, dataroot: str, mode: str = 'train'):
@@ -580,7 +593,9 @@ class KlDetectionEval:
         for class_name in self.cfg.class_names:
             for dist_th in self.cfg.dist_ths:
                 callable = center_distance if self.cfg.dist_fcn == 'center_distance' else self.cfg.dist_fcn_callable
-                md = accumulate_pi_symmetric(self.gt_boxes, self.pred_boxes, class_name, callable, dist_th)
+                md = accumulate_pi_symmetric(
+                    self.gt_boxes, self.pred_boxes, class_name, callable,
+                    dist_th, pi_symmetric_classes=self.cfg.pi_symmetric_classes)
                 metric_data_list.set(class_name, dist_th, md)
         metrics = KlDetectionMetrics(self.cfg)
         for class_name in self.cfg.class_names:
@@ -722,6 +737,7 @@ class KlMetric(BaseMetric):
                  detect_range: Optional[float] = None,
                  class_range: Optional[Dict[str, float]] = None,
                  point_cloud_range: Optional[List[float]] = None,
+                 pi_symmetric_classes: Optional[List[str]] = None,
                  prefix: Optional[str] = None,
                  format_only: bool = False,
                  jsonfile_prefix: Optional[str] = None,
@@ -770,7 +786,8 @@ class KlMetric(BaseMetric):
             min_precision=kldevconfig_info.min_precision,
             max_boxes_per_sample=kldevconfig_info.max_boxes_per_sample,
             mean_ap_weight=kldevconfig_info.mean_ap_weight,
-            point_cloud_range=point_cloud_range
+            point_cloud_range=point_cloud_range,
+            pi_symmetric_classes=pi_symmetric_classes
         )
 
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:

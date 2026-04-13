@@ -276,20 +276,23 @@ def save_multi_cam_images_from_path(
 # Box projection onto images
 # =====================================================
 
-def _project_boxes_to_corners_cam(gt_boxes, R, t):
+def _project_boxes_to_corners_cam(gt_boxes, R, t, z_bottom=False):
     """Project 3D boxes (lidar frame) to camera-frame corners.
 
     Args:
         gt_boxes: (N, >=7) boxes in lidar frame.
         R: (3, 3) rotation part of lidar2cam.
         t: (3,)   translation part of lidar2cam.
+        z_bottom: if True, treat box[2] as bottom-center z (mmdet3d
+            LiDARInstance3DBoxes convention). If False, treat it as
+            geometric center (legacy KL info-file convention).
 
     Returns:
         list of (8, 3) arrays (only boxes in front of camera).
     """
     corners_list = []
     for box in gt_boxes:
-        corners_lidar = box_to_corners_3d(box, z_bottom=False)
+        corners_lidar = box_to_corners_3d(box, z_bottom=z_bottom)
         corners_cam = corners_lidar @ R.T + t
         if not np.all(corners_cam[:, 2] <= 0):
             corners_list.append(corners_cam)

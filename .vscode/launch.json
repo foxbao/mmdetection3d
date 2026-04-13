@@ -1,21 +1,28 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "create_data_kl",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/tools/create_data.py",
-      "args": [
-        "kl",
-        "--root-path", "./data/kl_8",
-        "--out-dir", "./data/kl_8",
-        "--extra-tag", "kl",
-        "--version", "v1.0-trainval",
-        "--cfg", "projects/BEVFusion/configs/kl_8.py"
-      ],
-      "console": "integratedTerminal",
-      "justMyCode": false
-    }
-  ]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug BEVFusion (single GPU)",
+            "type": "debugpy",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/tools/train.py",
+
+            "args": [
+                "projects/BEVFusion/configs/bevfusion_cam_resnet_lss_kl.py",
+                "--launcher", "none",
+                "--amp"
+            ],
+
+            "console": "integratedTerminal",
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+
+            "justMyCode": false,
+            "subProcess": false
+        }
+    ]
 }
