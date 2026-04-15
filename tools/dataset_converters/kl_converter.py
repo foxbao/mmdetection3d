@@ -147,6 +147,45 @@ def find_nearest_ts_index(sorted_ts,target_ts):
         next_diff = abs(sorted_ts[idx]-target_ts)
         return idx-1 if prev_diff<=next_diff else idx
 
+def get_sensor_time_offset(frame_info, sensor_name):
+    """Return configured timestamp offset in seconds for a sensor.
+
+    A positive offset means raw sensor timestamps are later than the frame
+    clock by that amount. Matching uses ``raw_ts - offset`` against frame time.
+    """
+    offsets = frame_info.get('sensor_time_offsets', {}) or {}
+    if sensor_name in offsets:
+        return float(offsets[sensor_name])
+    mapped_name = CAM_NAME_MAP.get(sensor_name)
+    if mapped_name in offsets:
+        return float(offsets[mapped_name])
+    return 0.0
+
+def match_nearest_timestamp(sorted_ts, frame_id, offset=0.0):
+    """Find nearest raw timestamp after applying a fixed sensor offset."""
+    nearest_idx = find_nearest_ts_index(sorted_ts, frame_id + offset)
+    nearest_ts = float(sorted_ts[nearest_idx])
+    raw_dt = nearest_ts - frame_id
+    corrected_dt = nearest_ts - offset - frame_id
+    return nearest_idx, nearest_ts, raw_dt, corrected_dt
+
+def make_sync_entry(timestamp, frame_id, offset, path=None, valid=True,
+                    reason=''):
+    entry = {
+        'timestamp': float(timestamp) if timestamp is not None else None,
+        'dt': float(timestamp - frame_id) if timestamp is not None else None,
+        'offset': float(offset),
+        'dt_corrected': (
+            float(timestamp - offset - frame_id)
+            if timestamp is not None else None),
+        'valid': bool(valid),
+    }
+    if path is not None:
+        entry['path'] = str(path)
+    if reason:
+        entry['reason'] = reason
+    return entry
+
 def generate_token():
     import uuid
     return str(uuid.uuid4())
@@ -199,50 +238,61 @@ def get_undist_image_path(img_path: Path):
 def merge_lidar_points(frame_info, frame_id, merged_file):
     """
     返回:
-        True  -> 成功（或者文件已存在）
-        False -> 失败（时间对不上 / 文件缺失）
+        (True, sync_info)  -> 成功（或者文件已存在）
+        (False, sync_info) -> 失败（时间对不上 / 文件缺失）
     """
-    if merged_file.exists():
-        return True
-
+    should_write = not merged_file.exists()
     merged_points = []
+    lidar_sync = {}
 
     for lidar_name in frame_info['used_lidars']:
         ts_array = frame_info['lidar_sorted_ts'][lidar_name]
-        nearest_idx = find_nearest_ts_index(ts_array, frame_id)
-        nearest_ts = ts_array[nearest_idx]
+        offset = get_sensor_time_offset(frame_info, lidar_name)
+        nearest_idx, nearest_ts, _, corrected_dt = match_nearest_timestamp(
+            ts_array, frame_id, offset)
 
-        if abs(nearest_ts - frame_id) > frame_info['max_diff']:
-            return False
+        if abs(corrected_dt) > frame_info['lidar_max_diff']:
+            lidar_sync[lidar_name] = make_sync_entry(
+                nearest_ts, frame_id, offset, valid=False,
+                reason='lidar timestamp exceeds max diff')
+            return False, lidar_sync
 
         lidar_file = frame_info['lidar_file_index'][lidar_name][nearest_ts]
         if not lidar_file.exists():
-            return False
+            lidar_sync[lidar_name] = make_sync_entry(
+                nearest_ts, frame_id, offset, lidar_file, valid=False,
+                reason='lidar file missing')
+            return False, lidar_sync
 
-        points = read_pc(lidar_file)
-        T = get_transform_matrix(frame_info['extrinsics_dict'][lidar_name])
-        points_trans = transform_points_numba(points, T[:3, :3], T[:3, 3])
+        lidar_sync[lidar_name] = make_sync_entry(
+            nearest_ts, frame_id, offset, lidar_file)
 
-        # 我们的坐标系本身是x朝前，y朝左，z朝上，nus坐标系是x朝右，y朝前，z朝上，所以沿着z轴旋转90度
-        # 所以新的坐标点，x=-y，y=x，z=z
-        if frame_info['coord_transform']:
-            pts = np.empty_like(points_trans)
-            pts[:, 0] = -points_trans[:, 1]
-            pts[:, 1] = points_trans[:, 0]
-            pts[:, 2] = points_trans[:, 2]
-            pts[:, 3:] = points_trans[:, 3:]
-            merged_points.append(pts)
-        else:
-            merged_points.append(points_trans)
+        if should_write:
+            points = read_pc(lidar_file)
+            T = get_transform_matrix(frame_info['extrinsics_dict'][lidar_name])
+            points_trans = transform_points_numba(
+                points, T[:3, :3], T[:3, 3])
 
-    if not merged_points:
-        return False
+            # 我们的坐标系本身是x朝前，y朝左，z朝上，nus坐标系是x朝右，y朝前，z朝上，所以沿着z轴旋转90度
+            # 所以新的坐标点，x=-y，y=x，z=z
+            if frame_info['coord_transform']:
+                pts = np.empty_like(points_trans)
+                pts[:, 0] = -points_trans[:, 1]
+                pts[:, 1] = points_trans[:, 0]
+                pts[:, 2] = points_trans[:, 2]
+                pts[:, 3:] = points_trans[:, 3:]
+                merged_points.append(pts)
+            else:
+                merged_points.append(points_trans)
 
-    merged_points = np.vstack(merged_points).astype(np.float32)
-    merged_points = merged_points[~np.isnan(merged_points).any(axis=1)]
-    merged_points.tofile(merged_file)
+    if should_write:
+        if not merged_points:
+            return False, lidar_sync
+        merged_points = np.vstack(merged_points).astype(np.float32)
+        merged_points = merged_points[~np.isnan(merged_points).any(axis=1)]
+        merged_points.tofile(merged_file)
 
-    return True
+    return True, lidar_sync
 
 def make_yaw_rotation(yaw_deg):
     yaw = np.deg2rad(yaw_deg)
@@ -255,6 +305,7 @@ def make_yaw_rotation(yaw_deg):
 
 def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
     cams = {}
+    camera_sync = {}
 
     for cam_name in frame_info['used_cameras']:
         if cam_name not in CAM_NAME_MAP:
@@ -262,15 +313,24 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
 
         ts_array = frame_info['camera_sorted_ts'].get(cam_name)
         if ts_array is None:
+            camera_sync[cam_name] = make_sync_entry(
+                None, frame_id, get_sensor_time_offset(frame_info, cam_name),
+                valid=False, reason='camera timestamp index missing')
             continue
 
-        nearest_idx = find_nearest_ts_index(ts_array, frame_id)
-        nearest_ts = ts_array[nearest_idx]
+        offset = get_sensor_time_offset(frame_info, cam_name)
+        nearest_idx, nearest_ts, _, corrected_dt = match_nearest_timestamp(
+            ts_array, frame_id, offset)
 
-        if abs(nearest_ts - frame_id) > frame_info['max_diff']:
+        if abs(corrected_dt) > frame_info['camera_max_diff']:
+            camera_sync[cam_name] = make_sync_entry(
+                nearest_ts, frame_id, offset, valid=False,
+                reason='camera timestamp exceeds max diff')
             continue
 
         img_path = frame_info['camera_file_index'][cam_name][nearest_ts]
+        camera_sync[cam_name] = make_sync_entry(
+            nearest_ts, frame_id, offset, img_path)
         intrin = frame_info['camera_intrinsics_dict'][cam_name]
 
         # ---------- 原始 K / D ----------
@@ -399,7 +459,7 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
 
         cams[CAM_NAME_MAP[cam_name]] = cam_info
 
-    return cams
+    return cams, camera_sync
 
 def recompute_num_lidar_pts(
     gt_boxes,
@@ -585,26 +645,73 @@ def process_gt_annotations(frame_info, frame_id, lidar_path, device='cuda'):
         'gt_velocity': np.zeros((len(anno_data), 2), dtype=np.float32),
         'num_lidar_pts': num_lidar_pts.tolist(),
         'num_radar_pts': [0] * len(anno_data),
-        'valid_flag': (num_lidar_pts > 0).tolist()
+        'valid_flag': (num_lidar_pts > 0).tolist(),
+        'track_ids': [ann.get('track_id', -1) for ann in anno_data],
     }
 
     return gt_dict
 
 def process_frame(frame_info):
     frame_id = float(frame_info['frame_stem'])
+    sync_info = {
+        'frame_timestamp': frame_id,
+        'label': make_sync_entry(
+            frame_id, frame_id, 0.0,
+            path=frame_info.get('label_path')),
+        'lidars': {},
+        'cameras': {},
+        'localization': make_sync_entry(
+            None, frame_id, get_sensor_time_offset(frame_info, 'localization'),
+            valid=False, reason='localization not found'),
+    }
+
+    # ===== 读取 ego pose（从 localization JSON）=====
+    ego2global_translation = [0.0, 0.0, 0.0]
+    ego2global_rotation    = [1.0, 0.0, 0.0, 0.0]  # w,x,y,z
+    loc_dir = frame_info.get('localization_dir')
+    loc_offset = get_sensor_time_offset(frame_info, 'localization')
+    if loc_dir is not None and Path(loc_dir).is_dir():
+        loc_files = list(Path(loc_dir).glob('*.json'))
+        if loc_files:
+            loc_ts = np.array([float(p.stem) for p in loc_files])
+            idx_sort = np.argsort(loc_ts)
+            loc_ts = loc_ts[idx_sort]
+            loc_files = [loc_files[i] for i in idx_sort]
+            nearest_idx, nearest_ts, _, corrected_dt = match_nearest_timestamp(
+                loc_ts, frame_id, loc_offset)
+            loc_path = loc_files[nearest_idx]
+            loc_valid = abs(corrected_dt) < frame_info['localization_max_diff']
+            sync_info['localization'] = make_sync_entry(
+                nearest_ts, frame_id, loc_offset, loc_path, valid=loc_valid,
+                reason='' if loc_valid else
+                'localization timestamp exceeds max diff')
+            if loc_valid:
+                with open(loc_path, 'r') as f:
+                    loc = json.load(f)
+                pos = loc['position']
+                ori = loc['orientation']
+                ego2global_translation = [pos['x'], pos['y'], pos['z']]
+                ego2global_rotation    = [ori['w'], ori['x'], ori['y'], ori['z']]
+
+    if (frame_info.get('require_valid_localization', False)
+            and not sync_info['localization'].get('valid', False)):
+        return None
 
     # =================== 基础 info ===================
     info = {
         'lidar_path': None,   # 先占位，后面补
-        'num_features': 4,
+        # Merged KL bins are saved as x, y, z, intensity, timestamp_2us.
+        'num_features': 5,
         'token': generate_token(),
         'sweeps': [],
         'cams': {},
         'lidar2ego_translation': [0, 0, 0],
         'lidar2ego_rotation': [1, 0, 0, 0],
-        'ego2global_translation': [0, 0, 0],
-        'ego2global_rotation': [1, 0, 0, 0],
+        'ego2global_translation': ego2global_translation,
+        'ego2global_rotation': ego2global_rotation,
         'timestamp': frame_id,
+        'scene_token': frame_info.get('scene_token', ''),
+        'sync_info': sync_info,
         # 👇 保留 frame_info 里 GT 需要的信息
         'frame_info': frame_info,
     }
@@ -612,14 +719,16 @@ def process_frame(frame_info):
     # =================== LiDAR ===================
     # save the merged lidar file in 'samples' folder
     merged_file = frame_info['save_path'] / f"{frame_info['frame_stem']}.bin"
-    ok = merge_lidar_points(frame_info, frame_id, merged_file)
+    ok, lidar_sync = merge_lidar_points(frame_info, frame_id, merged_file)
+    info['sync_info']['lidars'] = lidar_sync
     if not ok:
         return None
     info['lidar_path'] = str(merged_file)
 
     # =================== Camera ===================
     scale = frame_info.get('img_scale', 1.0 / 3.0)
-    cams = process_cameras(frame_info, frame_id, scale=scale)
+    cams, camera_sync = process_cameras(frame_info, frame_id, scale=scale)
+    info['sync_info']['cameras'] = camera_sync
     expected_cams = [c for c in frame_info['used_cameras'] if c in CAM_NAME_MAP]
     if len(cams) != len(expected_cams):
         return None
@@ -674,8 +783,85 @@ def process_gt_for_infos(infos, device='cuda'):
 
     return final_infos
 
+def _sync_stats(values):
+    if not values:
+        return dict(count=0)
+    arr = np.asarray(values, dtype=np.float64)
+    abs_arr = np.abs(arr)
+    return dict(
+        count=int(arr.size),
+        mean=float(arr.mean()),
+        median=float(np.median(arr)),
+        std=float(arr.std()),
+        min=float(arr.min()),
+        max=float(arr.max()),
+        abs_median=float(np.median(abs_arr)),
+        abs_p95=float(np.percentile(abs_arr, 95)),
+        abs_max=float(abs_arr.max()))
+
+def summarize_sync_infos(infos, out_path):
+    """Write per-sensor timestamp alignment stats for KL conversion."""
+    buckets = {}
+    invalid_counts = {}
+
+    def add_entry(group, name, entry):
+        key = f'{group}/{name}'
+        if not entry or not entry.get('valid', False):
+            invalid_counts[key] = invalid_counts.get(key, 0) + 1
+            return
+        dt = entry.get('dt')
+        dt_corrected = entry.get('dt_corrected', dt)
+        if dt is None:
+            invalid_counts[key] = invalid_counts.get(key, 0) + 1
+            return
+        bucket = buckets.setdefault(key, dict(dt=[], dt_corrected=[]))
+        bucket['dt'].append(float(dt))
+        bucket['dt_corrected'].append(float(dt_corrected))
+
+    for info in infos:
+        sync = info.get('sync_info', {})
+        for name, entry in sync.get('lidars', {}).items():
+            add_entry('lidar', name, entry)
+        for name, entry in sync.get('cameras', {}).items():
+            add_entry('camera', name, entry)
+        if 'localization' in sync:
+            add_entry('localization', 'ego_pose', sync['localization'])
+
+    report = {
+        'num_frames': len(infos),
+        'sensors': {},
+    }
+    for key in sorted(set(buckets) | set(invalid_counts)):
+        vals = buckets.get(key, dict(dt=[], dt_corrected=[]))
+        report['sensors'][key] = {
+            'invalid_count': int(invalid_counts.get(key, 0)),
+            'dt': _sync_stats(vals['dt']),
+            'dt_corrected': _sync_stats(vals['dt_corrected']),
+        }
+
+    with open(out_path, 'w') as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+
+    print(f'[Sync] wrote report: {out_path}')
+    for key, stats in report['sensors'].items():
+        dt = stats['dt_corrected']
+        if dt.get('count', 0) == 0:
+            print(f'[Sync] {key}: no valid samples, '
+                  f'invalid={stats["invalid_count"]}')
+            continue
+        print(f'[Sync] {key}: n={dt["count"]}, '
+              f'median={dt["median"]:.6f}s, '
+              f'abs_p95={dt["abs_p95"]:.6f}s, '
+              f'abs_max={dt["abs_max"]:.6f}s, '
+              f'invalid={stats["invalid_count"]}')
+
 # ------------------- 主函数 -------------------
-def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform = True,max_diff=0.05,cfg=None):
+def generate_frame_bin_parallel(data_root, info_prefix, version,
+                                target_lidar_frame: str = 'RFU',
+                                max_diff=0.05, cfg=None):
+    assert target_lidar_frame in ('RFU', 'FLU'), (
+        f"target_lidar_frame must be 'RFU' or 'FLU', got {target_lidar_frame!r}")
+    coord_transform = (target_lidar_frame == 'RFU')
     # info_prefix = 'kl'
     data_root = Path(data_root)
     sample_path = data_root/version/'sample'
@@ -688,6 +874,20 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     img_scale = 1.0 / 3.0
     if cfg is not None and hasattr(cfg, 'img_scale'):
         img_scale = cfg.img_scale
+
+    sync_cfg = {}
+    if cfg is not None and hasattr(cfg, 'sync_cfg'):
+        sync_cfg = dict(cfg.sync_cfg)
+    sensor_time_offsets = sync_cfg.get(
+        'sensor_time_offsets', sync_cfg.get('sensor_offsets', {}))
+    lidar_max_diff = float(sync_cfg.get('lidar_max_diff', max_diff))
+    camera_max_diff = float(sync_cfg.get('camera_max_diff', max_diff))
+    localization_max_diff = float(
+        sync_cfg.get('localization_max_diff', 0.15))
+    require_valid_localization = bool(
+        sync_cfg.get('require_valid_localization', False))
+    min_adj_time_diff = float(sync_cfg.get('min_adj_time_diff', 0.0))
+    max_adj_time_diff = float(sync_cfg.get('max_adj_time_diff', float('inf')))
 
     frame_info_list = []
     # lidar_dirs = [p.parent for p in sample_path.rglob("lidar") if p.is_dir()]
@@ -861,6 +1061,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
         save_path.mkdir(parents=True, exist_ok=True)
 
         # ---------- frame info ----------
+        localization_dir = scene_path / 'localization'
+        scene_token = f"{scene_path.parent.name}/{scene_path.name}"
         for label_file in label_files:
             frame_info_list.append({
                 'frame_stem': label_file.stem,
@@ -874,12 +1076,23 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
                 'camera_extrinsics_dict': camera_extrinsics_dict,
                 'camera_intrinsics_dict': camera_intrinsics_dict,
                 'save_path': save_path,
+                'label_path': label_file,
                 'label_file_list': label_files,
                 'label_ts_list': label_ts_list,
                 'max_diff': max_diff,
+                'lidar_max_diff': lidar_max_diff,
+                'camera_max_diff': camera_max_diff,
+                'localization_max_diff': localization_max_diff,
+                'require_valid_localization': require_valid_localization,
+                'min_adj_time_diff': min_adj_time_diff,
+                'max_adj_time_diff': max_adj_time_diff,
+                'sensor_time_offsets': sensor_time_offsets,
                 'coord_transform': coord_transform,
+                'target_lidar_frame': target_lidar_frame,
                 'gt_annotation_filter': gt_annotation_filter,
                 'img_scale': img_scale,
+                'localization_dir': localization_dir,
+                'scene_token': scene_token,
             })
 
 
@@ -903,6 +1116,34 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     gt_device = 'cuda' if torch.cuda.is_available() else 'cpu'
     all_infos = process_gt_for_infos(base_infos, device=gt_device)
     print(f"[Stage 2] gt process, final frames: {len(all_infos)}")
+    summarize_sync_infos(
+        all_infos, osp.join(data_root, f'{info_prefix}_sync_report.json'))
+
+    # ===== 构建 scene 分组和 prev/next 链表 =====
+    from collections import defaultdict
+    scene_groups = defaultdict(list)
+    for idx, info in enumerate(all_infos):
+        info['prev'] = ''
+        info['next'] = ''
+        scene_groups[info['scene_token']].append(idx)
+    n_with_prev = 0
+    n_broken_time = 0
+    for scene_tok, indices in scene_groups.items():
+        indices.sort(key=lambda i: all_infos[i]['timestamp'])
+        for prev_idx, cur_idx in zip(indices, indices[1:]):
+            dt = all_infos[cur_idx]['timestamp'] - all_infos[prev_idx][
+                'timestamp']
+            if min_adj_time_diff <= dt <= max_adj_time_diff:
+                all_infos[cur_idx]['prev'] = all_infos[prev_idx]['token']
+                all_infos[prev_idx]['next'] = all_infos[cur_idx]['token']
+                n_with_prev += 1
+            else:
+                n_broken_time += 1
+    print(f"[Stage 3] prev/next built: {len(scene_groups)} scenes, "
+          f"{n_with_prev}/{len(all_infos)} frames have prev, "
+          f"{n_broken_time} links broken by time gap "
+          f"[{min_adj_time_diff}, {max_adj_time_diff}]s")
+    # ===== END =====
     # gt_info = process_gt_annotations(frame_info, frame_id,lidar_path=info['lidar_path'])
     # if gt_info is None:
     #     return None
@@ -924,13 +1165,27 @@ def generate_frame_bin_parallel(data_root, info_prefix, version, coord_transform
     # for info in all_infos:
     #     validate_img_box(info)
     
+    # Scene-level split: keep all frames of a scene on the same side.
+    # Frame-level split would break temporal fusion (historical frames leak
+    # across train/val) and forecasting (`next` chains cross the split).
+    scenes = sorted({info['scene_token'] for info in all_infos})
     rng = np.random.default_rng(seed=42)
-    perm = rng.permutation(n)
-    split_idx = int(n*0.9)
-    train_results = [all_infos[i] for i in perm[:split_idx]]
-    val_results = [all_infos[i] for i in perm[split_idx:]]
-    print(f"Total frames: {n}, Train: {len(train_results)}, Val: {len(val_results)}")
-    metadata = dict(version=version)
+    perm = rng.permutation(len(scenes))
+    split_idx = int(len(scenes) * 0.9)
+    train_scenes = {scenes[i] for i in perm[:split_idx]}
+    val_scenes   = {scenes[i] for i in perm[split_idx:]}
+    train_results = [info for info in all_infos
+                     if info['scene_token'] in train_scenes]
+    val_results   = [info for info in all_infos
+                     if info['scene_token'] in val_scenes]
+    print(f"Total scenes: {len(scenes)} "
+          f"(train: {len(train_scenes)}, val: {len(val_scenes)})")
+    print(f"Total frames: {n}, Train: {len(train_results)}, "
+          f"Val: {len(val_results)}")
+    metadata = dict(
+        version=version,
+        lidar_coord_frame=target_lidar_frame,
+    )
     data = dict(infos=train_results, metadata=metadata)
     info_path = osp.join(data_root,
                             '{}_infos_train.pkl'.format(info_prefix))
@@ -947,7 +1202,11 @@ def create_kl_infos(data_root, info_prefix, version='v1.0-trainval', cfg=None):
 
 
 # ------------------- 脚本入口 -------------------
-if __name__=="__main__":
-    data_root = '/media/cx/bak/data/kl'
-    version = 'v1.0-trainval'
-    generate_frame_bin_parallel(data_root, 'kl', version)
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data-root', default='/media/cx/bak/data/kl',
+                        help='Path to KL dataset root (contains v1.0-trainval/)')
+    parser.add_argument('--version', default='v1.0-trainval')
+    args = parser.parse_args()
+    generate_frame_bin_parallel(args.data_root, 'kl', args.version)

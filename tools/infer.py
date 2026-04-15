@@ -25,7 +25,7 @@ from utils.visualize_tools import (
     visualize_black_bg_vista,
     save_multi_cam_images_with_boxes,
     save_multi_cam_images_from_path,
-    show_multi_cam_images_from_path,
+    show_multi_cam_images_from_path,  
 )
 
 

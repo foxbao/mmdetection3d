@@ -47,7 +47,7 @@ def to_tensor(
 
 @TRANSFORMS.register_module()
 class Pack3DDetInputs(BaseTransform):
-    INPUTS_KEYS = ['points', 'img']
+    INPUTS_KEYS = ['points', 'img', 'adj_points', 'adj_ego_motions']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d'
     ]
@@ -76,7 +76,7 @@ class Pack3DDetInputs(BaseTransform):
                             'cam2global', 'crop_offset', 'img_crop_offset',
                             'resize_img_shape', 'lidar2cam', 'ori_lidar2img',
                             'num_ref_frames', 'num_views', 'ego2global',
-                            'axis_align_matrix')
+                            'axis_align_matrix', 'lidar_coord_frame')
     ) -> None:
         self.keys = keys
         self.meta_keys = meta_keys

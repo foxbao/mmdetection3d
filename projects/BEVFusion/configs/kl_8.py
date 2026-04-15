@@ -42,6 +42,20 @@ camera_selection = dict(
     ]
 )
 
+# Soft-sync settings for tools/create_data.py --cfg projects/BEVFusion/configs/kl_8.py
+# A positive sensor offset means raw sensor timestamps are later than the
+# label/frame timestamp by that many seconds. Defaults below preserve the
+# previous nearest-neighbor behavior while making the thresholds explicit.
+sync_cfg = dict(
+    lidar_max_diff=0.05,
+    camera_max_diff=0.05,
+    localization_max_diff=0.15,
+    require_valid_localization=True,
+    min_adj_time_diff=0.2,
+    max_adj_time_diff=1.2,
+    sensor_time_offsets={}
+)
+
 # gt_box_clamp = dict(
 #     enable=True,
 #     by_class={

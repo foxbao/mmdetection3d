@@ -1,7 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from os import path as osp
-from typing import Callable, List, Union
+from typing import Callable, List, Optional, Union
 
+import mmengine
 import numpy as np
 
 from mmdet3d.registry import DATASETS
@@ -109,9 +110,12 @@ class KlDataset(Det3DDataset):
                  test_mode: bool = False,
                  with_velocity: bool = True,
                  use_valid_flag: bool = False,
+                 num_adj_frames: int = 0,
                  **kwargs) -> None:
         self.use_valid_flag = use_valid_flag
         self.with_velocity = with_velocity
+        self.num_adj_frames = num_adj_frames
+        self._token_to_raw: dict = {}
 
         # TODO: Redesign multi-view data process in the future
         assert load_type in ('frame_based', 'mv_image_based',
@@ -128,6 +132,67 @@ class KlDataset(Det3DDataset):
             filter_empty_gt=filter_empty_gt,
             test_mode=test_mode,
             **kwargs)
+
+    def full_init(self) -> None:
+        """Override to pre-build token index for adj-frame lookup."""
+        if self._fully_initialized:
+            return
+
+        # Read lidar coord frame from pkl metainfo. KL pkls converted before
+        # the explicit-frame change have no field; default to 'RFU' to match
+        # historical behaviour (kl_converter coord_transform=True).
+        raw_data = mmengine.load(self.ann_file)
+        self.lidar_coord_frame = raw_data.get('metainfo', {}).get(
+            'lidar_coord_frame', 'RFU')
+        assert self.lidar_coord_frame in ('RFU', 'FLU'), (
+            f'invalid lidar_coord_frame in pkl metainfo: '
+            f'{self.lidar_coord_frame!r}')
+
+        if self.num_adj_frames > 0:
+            # Build token → minimal-info index from the same raw pkl.
+            # This must happen BEFORE super().full_init() so that
+            # parse_data_info() can use _token_to_raw.
+            raw_list = raw_data.get('data_list', raw_data.get('infos', []))
+            pts_prefix = self.data_prefix.get('pts', '')
+            for raw in raw_list:
+                tok = raw.get('token', '')
+                if not tok:
+                    continue
+                lp = raw.get('lidar_points', {}).get('lidar_path', '')
+                self._token_to_raw[tok] = {
+                    'lidar_path': osp.join(pts_prefix, lp) if lp else '',
+                    'ego2global': raw.get('ego2global', np.eye(4).tolist()),
+                    'timestamp': raw.get('timestamp', 0.0),
+                    'images': raw.get('images', {}),
+                    'prev': raw.get('prev', ''),
+                    'next': raw.get('next', ''),
+                }
+
+        super().full_init()
+
+    def _get_adj_infos(self, info: dict) -> List[Optional[dict]]:
+        """Follow the prev chain to collect N historical frame infos.
+
+        Returns a list of length num_adj_frames.  Each entry is either a dict
+        with {lidar_path, ego2global, timestamp, images} or None if the chain
+        ran out (scene boundary).
+        """
+        adj_infos = []
+        cur = info
+        for _ in range(self.num_adj_frames):
+            prev_token = cur.get('prev', '')
+            if prev_token and prev_token in self._token_to_raw:
+                cur = self._token_to_raw[prev_token]
+                adj_infos.append({
+                    'lidar_path': cur['lidar_path'],
+                    'ego2global': cur['ego2global'],
+                    'timestamp': cur['timestamp'],
+                    'images': cur['images'],
+                })
+            else:
+                adj_infos.append(None)
+                cur = info  # reset so remaining slots also get None
+        return adj_infos
 
     def _filter_with_mask(self, ann_info: dict) -> dict:
         """Remove annotations that do not need to be cared.
@@ -265,4 +330,7 @@ class KlDataset(Det3DDataset):
             return data_list
         else:
             data_info = super().parse_data_info(info)
+            if self.num_adj_frames > 0:
+                data_info['adj_infos'] = self._get_adj_infos(info)
+            data_info['lidar_coord_frame'] = self.lidar_coord_frame
             return data_info

@@ -2,6 +2,8 @@ from .bevfusion import BEVFusion
 from .bevfusion_necks import GeneralizedLSSFPN, GeneralizedResNet, LSSFPN
 from .depth_lss import DepthLSSTransform, LSSTransform
 from .loading import BEVLoadMultiViewImageFromFiles
+from .temporal_fuser import TemporalBEVFuser
+from .temporal_loading import LoadTemporalData
 from .sparse_encoder import BEVFusionSparseEncoder
 from .transformer import TransformerDecoderLayer
 from .transforms_3d import (BEVFusionGlobalRotScaleTrans,
@@ -17,5 +19,6 @@ __all__ = [
     'HeuristicAssigner3D', 'DepthLSSTransform', 'LSSTransform',
     'BEVLoadMultiViewImageFromFiles', 'BEVFusionSparseEncoder',
     'TransformerDecoderLayer', 'BEVFusionRandomFlip3D',
-    'BEVFusionGlobalRotScaleTrans'
+    'BEVFusionGlobalRotScaleTrans', 'LoadTemporalData',
+    'TemporalBEVFuser'
 ]

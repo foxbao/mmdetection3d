@@ -31,6 +31,7 @@ class BEVFusion(Base3DDetector):
         view_transform: Optional[dict] = None,
         img_neck: Optional[dict] = None,
         pts_neck: Optional[dict] = None,
+        temporal_fuser: Optional[dict] = None,
         bbox_head: Optional[dict] = None,
         init_cfg: OptMultiConfig = None,
         seg_head: Optional[dict] = None,
@@ -66,6 +67,9 @@ class BEVFusion(Base3DDetector):
             pts_backbone) if pts_backbone is not None else None
         self.pts_neck = MODELS.build(
             pts_neck) if pts_neck is not None else None
+
+        self.temporal_fuser = MODELS.build(
+            temporal_fuser) if temporal_fuser is not None else None
 
         self.bbox_head = MODELS.build(bbox_head)
 
@@ -177,7 +181,7 @@ class BEVFusion(Base3DDetector):
         with torch.autocast('cuda', enabled=False):
             points = [point.float() for point in points]
             feats, coords, sizes = self.voxelize(points)
-            batch_size = coords[-1, 0] + 1
+            batch_size = len(points)
         x = self.pts_middle_encoder(feats, coords, batch_size)
         return x
 
@@ -237,7 +241,10 @@ class BEVFusion(Base3DDetector):
                 contains a tensor with shape (num_instances, 7).
         """
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats = self.extract_feat(batch_inputs_dict, batch_input_metas)
+        temporal_kwargs = self._extract_temporal_kwargs(
+            batch_inputs_dict, batch_input_metas)
+        feats = self.extract_feat(
+            batch_inputs_dict, batch_input_metas, **temporal_kwargs)
 
         if self.with_bbox_head:
             if isinstance(self.bbox_head, CenterHead):
@@ -250,12 +257,12 @@ class BEVFusion(Base3DDetector):
 
         return res
 
-    def extract_feat(
+    def _extract_single_frame_bev(
         self,
         batch_inputs_dict,
         batch_input_metas,
-        **kwargs,
     ):
+        """Extract one-frame BEV features without temporal fusion."""
         imgs = batch_inputs_dict.get('imgs', None)
         points = batch_inputs_dict.get('points', None)
         features = []
@@ -299,11 +306,108 @@ class BEVFusion(Base3DDetector):
 
         return x
 
+    def extract_feat(
+        self,
+        batch_inputs_dict,
+        batch_input_metas,
+        **kwargs,
+    ):
+        x = self._extract_single_frame_bev(
+            batch_inputs_dict, batch_input_metas)
+
+        # ---------- temporal fusion (optional) ----------
+        if self.temporal_fuser is not None:
+            adj_bevs = kwargs.get('adj_bevs', [])
+            ego_motions = kwargs.get('ego_motions', [])
+            lidar_coord_frame = kwargs.get('lidar_coord_frame', 'FLU')
+            if adj_bevs:
+                # pts_neck returns list[Tensor]; unpack for temporal fuser
+                was_list = isinstance(x, (list, tuple))
+                x_tensor = x[0] if was_list else x
+                adj_tensors = [
+                    a[0] if isinstance(a, (list, tuple)) else a
+                    for a in adj_bevs
+                ]
+                x_tensor = self.temporal_fuser(
+                    x_tensor, adj_tensors, ego_motions,
+                    lidar_coord_frame=lidar_coord_frame)
+                x = [x_tensor] if was_list else x_tensor
+
+        return x
+
+    def _extract_temporal_kwargs(
+        self, batch_inputs_dict, batch_input_metas
+    ) -> dict:
+        """Build adj_bevs / ego_motions for temporal fusion if data exists.
+
+        After mmengine pseudo_collate, nested lists are **transposed**
+        (zip(*batch)), so the layout is **frame-major**:
+          adj_points:      [num_adj][batch] — list of Tensor or None
+          adj_ego_motions: [num_adj][batch] — list of Tensor(4,4)
+        """
+        if self.temporal_fuser is None:
+            return {}
+
+        raw_pts = batch_inputs_dict.get('adj_points', None)
+        raw_mot = batch_inputs_dict.get('adj_ego_motions', None)
+        if raw_pts is None or raw_mot is None:
+            return {}
+
+        # pseudo_collate transposes [batch][num_adj] → [num_adj][batch]
+        num_adj = len(raw_pts)
+        batch_size = len(raw_pts[0]) if num_adj > 0 else 0
+        if num_adj == 0 or batch_size == 0:
+            return {}
+
+        adj_bevs = []
+        ego_motions = []
+        device = next(self.parameters()).device
+
+        for frame_idx in range(num_adj):
+            # Ego-motion for this adj frame across the batch → (B, 4, 4)
+            motions = torch.stack([
+                raw_mot[frame_idx][b].to(device)
+                for b in range(batch_size)
+            ])
+            ego_motions.append(motions)
+
+            # Points for this adj frame across the batch
+            frame_pts = raw_pts[frame_idx]  # already [batch] after transpose
+            if any(p is None for p in frame_pts):
+                adj_bevs.append(None)
+                continue
+
+            # Extract BEV for this adj frame (no temporal fusion, no grad)
+            adj_batch = dict(batch_inputs_dict)
+            adj_batch['points'] = [
+                p.to(device).contiguous() for p in frame_pts]
+
+            with torch.no_grad():
+                adj_bev = self._extract_single_frame_bev(
+                    adj_batch, batch_input_metas)
+            if isinstance(adj_bev, (list, tuple)):
+                adj_bev = [t.detach() for t in adj_bev]
+            else:
+                adj_bev = adj_bev.detach()
+            adj_bevs.append(adj_bev)
+
+        # Source the lidar coord frame from pkl metainfo (carried in
+        # data_sample.metainfo via Pack3DDetInputs default meta_keys).
+        lidar_coord_frame = (
+            batch_input_metas[0].get('lidar_coord_frame', 'FLU')
+            if batch_input_metas else 'FLU')
+
+        return dict(adj_bevs=adj_bevs, ego_motions=ego_motions,
+                    lidar_coord_frame=lidar_coord_frame)
+
     def loss(self, batch_inputs_dict: Dict[str, Optional[Tensor]],
              batch_data_samples: List[Det3DDataSample],
              **kwargs) -> List[Det3DDataSample]:
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats = self.extract_feat(batch_inputs_dict, batch_input_metas)
+        temporal_kwargs = self._extract_temporal_kwargs(
+            batch_inputs_dict, batch_input_metas)
+        feats = self.extract_feat(
+            batch_inputs_dict, batch_input_metas, **temporal_kwargs)
 
         losses = dict()
         if self.with_bbox_head:

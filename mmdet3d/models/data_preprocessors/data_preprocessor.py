@@ -205,6 +205,11 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
                     imgs, data_samples = batch_aug(imgs, data_samples)
             batch_inputs['imgs'] = imgs
 
+        # Pass through temporal data (adj_points, adj_ego_motions) if present
+        for temporal_key in ('adj_points', 'adj_ego_motions'):
+            if temporal_key in inputs:
+                batch_inputs[temporal_key] = inputs[temporal_key]
+
         return {'inputs': batch_inputs, 'data_samples': data_samples}
 
     def preprocess_img(self, _batch_img: Tensor) -> Tensor:

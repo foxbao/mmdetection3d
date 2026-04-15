@@ -409,6 +409,21 @@ def update_nuscenes_infos(pkl_path, out_dir):
     converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')
+
+
+def normalize_kl_timestamp(timestamp):
+    """Return KL timestamps in seconds.
+
+    KL file names already use Unix seconds with fractional precision, while
+    nuScenes stores timestamps as integer microseconds. Older KL converter
+    code followed nuScenes and divided by 1e6 unconditionally.
+    """
+    if timestamp is None:
+        return None
+    timestamp = float(timestamp)
+    return timestamp / 1e6 if abs(timestamp) > 1e12 else timestamp
+
+
 def update_kl_infos(pkl_path, out_dir):
     camera_types = [
         'CAM_FRONT',
@@ -426,20 +441,20 @@ def update_kl_infos(pkl_path, out_dir):
     data_list = mmengine.load(pkl_path)
     METAINFO = {
         'classes':
-        (   "Pedestrian", 
-            "Car", 
-            "IGV-Full", 
-            "Truck", 
-            "Trailer-Empty", 
-            "Trailer-Full", 
-            "IGV-Empty", 
-            "Crane", 
-            "OtherVehicle", 
-            "Cone", 
-            "ContainerForklift", 
-            "Forklift", 
-            "Lorry", 
-            "ConstructionVehicle", 
+        (   "Pedestrian",
+            "Car",
+            "IGV-Full",
+            "Truck",
+            "Trailer-Empty",
+            "Trailer-Full",
+            "IGV-Empty",
+            "Crane",
+            "OtherVehicle",
+            "Cone",
+            "ContainerForklift",
+            "Forklift",
+            "Lorry",
+            "ConstructionVehicle",
             "WheelCrane"),
     }
     # nusc = KlDataset(
@@ -458,6 +473,11 @@ def update_kl_infos(pkl_path, out_dir):
         temp_data_info['ego2global'] = convert_quaternion_to_matrix(
             ori_info_dict['ego2global_rotation'],
             ori_info_dict['ego2global_translation'])
+        temp_data_info['prev']        = ori_info_dict.get('prev', '')
+        temp_data_info['next']        = ori_info_dict.get('next', '')
+        temp_data_info['scene_token'] = ori_info_dict.get('scene_token', '')
+        if 'sync_info' in ori_info_dict:
+            temp_data_info['sync_info'] = ori_info_dict['sync_info']
         temp_data_info['lidar_points']['num_pts_feats'] = ori_info_dict.get(
             'num_features', 5)
         temp_data_info['lidar_points']['lidar_path'] = Path(
@@ -466,8 +486,8 @@ def update_kl_infos(pkl_path, out_dir):
             'lidar2ego'] = convert_quaternion_to_matrix(
                 ori_info_dict['lidar2ego_rotation'],
                 ori_info_dict['lidar2ego_translation'])
-        # bc-breaking: Timestamp has divided 1e6 in pkl infos.
-        temp_data_info['timestamp'] = ori_info_dict['timestamp'] / 1e6
+        temp_data_info['timestamp'] = normalize_kl_timestamp(
+            ori_info_dict['timestamp'])
         for ori_sweep in ori_info_dict['sweeps']:
             temp_lidar_sweep = get_single_lidar_sweep()
             temp_lidar_sweep['lidar_points'][
@@ -484,7 +504,8 @@ def update_kl_infos(pkl_path, out_dir):
             lidar2sensor[:3, 3:4] = -1 * np.matmul(rot.T, trans.reshape(3, 1))
             temp_lidar_sweep['lidar_points'][
                 'lidar2sensor'] = lidar2sensor.astype(np.float32).tolist()
-            temp_lidar_sweep['timestamp'] = ori_sweep['timestamp'] / 1e6
+            temp_lidar_sweep['timestamp'] = normalize_kl_timestamp(
+                ori_sweep['timestamp'])
             temp_lidar_sweep['lidar_points']['lidar_path'] = ori_sweep[
                 'data_path']
             temp_lidar_sweep['sample_data_token'] = ori_sweep[
@@ -504,9 +525,9 @@ def update_kl_infos(pkl_path, out_dir):
                 'cam_intrinsic'].tolist()
             empty_img_info['sample_data_token'] = ori_info_dict['cams'][cam][
                 'sample_data_token']
-            # bc-breaking: Timestamp has divided 1e6 in pkl infos.
             empty_img_info[
-                'timestamp'] = ori_info_dict['cams'][cam]['timestamp'] / 1e6
+                'timestamp'] = normalize_kl_timestamp(
+                    ori_info_dict['cams'][cam]['timestamp'])
             empty_img_info['cam2ego'] = convert_quaternion_to_matrix(
                 ori_info_dict['cams'][cam]['sensor2ego_rotation'],
                 ori_info_dict['cams'][cam]['sensor2ego_translation'])
@@ -541,6 +562,8 @@ def update_kl_infos(pkl_path, out_dir):
                     'num_radar_pts'][i]
                 empty_instance['bbox_3d_isvalid'] = ori_info_dict[
                     'valid_flag'][i]
+                if 'track_ids' in ori_info_dict:
+                    empty_instance['track_id'] = ori_info_dict['track_ids'][i]
                 empty_instance = clear_instance_unused_keys(empty_instance)
                 temp_data_info['instances'].append(empty_instance)
             temp_data_info[
@@ -564,6 +587,9 @@ def update_kl_infos(pkl_path, out_dir):
     metainfo['dataset'] = 'nuscenes'
     metainfo['version'] = data_list['metadata']['version']
     metainfo['info_version'] = '1.1'
+    src_metadata = data_list.get('metadata', {})
+    metainfo['lidar_coord_frame'] = src_metadata.get(
+        'lidar_coord_frame', 'RFU')
     converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')

@@ -307,7 +307,7 @@ train_dataloader = dict(
             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
             box_type_3d='LiDAR')))
 val_dataloader = dict(
-    batch_size=8,
+    batch_size=6,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -387,7 +387,7 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=20, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=5)
 val_cfg = dict()
 test_cfg = dict()
 

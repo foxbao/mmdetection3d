@@ -113,6 +113,12 @@ def kl_data_prep(root_path,
     info_val_path = osp.join(out_dir, f'{info_prefix}_infos_val.pkl')
     update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_train_path)
     update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_val_path)
+
+    # Add GT forecasting trajectories (requires prev/next + scene_token in v2).
+    from tools.dataset_converters.add_forecasting import add_forecasting_to_pkl
+    add_forecasting_to_pkl(info_train_path, forecast_steps=6)
+    add_forecasting_to_pkl(info_val_path, forecast_steps=6)
+
     create_groundtruth_database(dataset_name, root_path, info_prefix,
                                 f'{info_prefix}_infos_train.pkl')
 
