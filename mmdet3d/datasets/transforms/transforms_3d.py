@@ -437,6 +437,16 @@ class ObjectSample(BaseTransform):
             gt_bboxes_3d = gt_bboxes_3d.new_box(
                 np.concatenate([gt_bboxes_3d.numpy(), sampled_gt_bboxes_3d]))
 
+            n_sampled = len(sampled_gt_labels)
+            if 'gt_forecasting_locs' in input_dict:
+                fl = input_dict['gt_forecasting_locs']
+                pad = np.zeros((n_sampled,) + fl.shape[1:], dtype=fl.dtype)
+                input_dict['gt_forecasting_locs'] = np.concatenate([fl, pad])
+            if 'gt_forecasting_mask' in input_dict:
+                fm = input_dict['gt_forecasting_mask']
+                pad = np.zeros((n_sampled,) + fm.shape[1:], dtype=fm.dtype)
+                input_dict['gt_forecasting_mask'] = np.concatenate([fm, pad])
+
             points = self.remove_points_in_boxes(points, sampled_gt_bboxes_3d)
             # check the points dimension
             points = points.cat([sampled_points, points])
@@ -892,6 +902,11 @@ class ObjectRangeFilter(BaseTransform):
         input_dict['gt_bboxes_3d'] = gt_bboxes_3d
         input_dict['gt_labels_3d'] = gt_labels_3d
 
+        np_mask = mask.numpy().astype(bool)
+        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+            if key in input_dict:
+                input_dict[key] = input_dict[key][np_mask]
+
         return input_dict
 
     def __repr__(self) -> str:
@@ -947,6 +962,19 @@ class PointsRangeFilter(BaseTransform):
         if pts_semantic_mask is not None:
             input_dict['pts_semantic_mask'] = pts_semantic_mask[points_mask]
 
+        if 'adj_points' in input_dict:
+            pc_min = torch.as_tensor(self.pcd_range[:3])
+            pc_max = torch.as_tensor(self.pcd_range[3:])
+            filtered = []
+            for adj_pts in input_dict['adj_points']:
+                if adj_pts is None:
+                    filtered.append(None)
+                    continue
+                xyz = adj_pts[:, :3]
+                mask = ((xyz >= pc_min) & (xyz <= pc_max)).all(dim=1)
+                filtered.append(adj_pts[mask])
+            input_dict['adj_points'] = filtered
+
         return input_dict
 
     def __repr__(self) -> str:
@@ -991,6 +1019,10 @@ class ObjectNameFilter(BaseTransform):
                                   dtype=bool)
         input_dict['gt_bboxes_3d'] = input_dict['gt_bboxes_3d'][gt_bboxes_mask]
         input_dict['gt_labels_3d'] = input_dict['gt_labels_3d'][gt_bboxes_mask]
+
+        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+            if key in input_dict:
+                input_dict[key] = input_dict[key][gt_bboxes_mask]
 
         return input_dict
 

@@ -49,7 +49,8 @@ def to_tensor(
 class Pack3DDetInputs(BaseTransform):
     INPUTS_KEYS = ['points', 'img', 'adj_points', 'adj_ego_motions']
     INSTANCEDATA_3D_KEYS = [
-        'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d'
+        'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d',
+        'gt_forecasting_locs', 'gt_forecasting_mask',
     ]
     INSTANCEDATA_2D_KEYS = [
         'gt_bboxes',
@@ -173,7 +174,8 @@ class Pack3DDetInputs(BaseTransform):
         for key in [
                 'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
                 'gt_bboxes_labels', 'attr_labels', 'pts_instance_mask',
-                'pts_semantic_mask', 'centers_2d', 'depths', 'gt_labels_3d'
+                'pts_semantic_mask', 'centers_2d', 'depths', 'gt_labels_3d',
+                'gt_forecasting_locs', 'gt_forecasting_mask',
         ]:
             if key not in results:
                 continue

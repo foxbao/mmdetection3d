@@ -138,12 +138,12 @@ class KlDataset(Det3DDataset):
         if self._fully_initialized:
             return
 
-        # Read lidar coord frame from pkl metainfo. KL pkls converted before
-        # the explicit-frame change have no field; default to 'RFU' to match
-        # historical behaviour (kl_converter coord_transform=True).
+        # Read lidar coord frame from pkl metainfo. Default 'FLU' to match
+        # KL's native sensor/body convention; legacy RFU pkls must carry the
+        # field explicitly (patch_kl_metainfo.py --frame RFU).
         raw_data = mmengine.load(self.ann_file)
         self.lidar_coord_frame = raw_data.get('metainfo', {}).get(
-            'lidar_coord_frame', 'RFU')
+            'lidar_coord_frame', 'FLU')
         assert self.lidar_coord_frame in ('RFU', 'FLU'), (
             f'invalid lidar_coord_frame in pkl metainfo: '
             f'{self.lidar_coord_frame!r}')
@@ -249,6 +249,9 @@ class KlDataset(Det3DDataset):
             else:
                 ann_info['gt_bboxes_3d'] = np.zeros((0, 7), dtype=np.float32)
             ann_info['gt_labels_3d'] = np.zeros(0, dtype=np.int64)
+            ann_info['gt_forecasting_locs'] = np.zeros((0, 6, 2),
+                                                        dtype=np.float32)
+            ann_info['gt_forecasting_mask'] = np.zeros((0, 6), dtype=np.bool_)
 
             if self.load_type in ['fov_image_based', 'mv_image_based']:
                 ann_info['gt_bboxes'] = np.zeros((0, 4), dtype=np.float32)

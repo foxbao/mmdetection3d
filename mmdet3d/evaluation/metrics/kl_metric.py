@@ -738,6 +738,8 @@ class KlMetric(BaseMetric):
                  class_range: Optional[Dict[str, float]] = None,
                  point_cloud_range: Optional[List[float]] = None,
                  pi_symmetric_classes: Optional[List[str]] = None,
+                 forecast_match_dist_thr: float = 2.0,
+                 forecast_miss_thr: float = 2.0,
                  prefix: Optional[str] = None,
                  format_only: bool = False,
                  jsonfile_prefix: Optional[str] = None,
@@ -765,6 +767,8 @@ class KlMetric(BaseMetric):
         self.backend_args = backend_args
 
         self.metrics = metric if isinstance(metric, list) else [metric]
+        self.forecast_match_dist_thr = forecast_match_dist_thr
+        self.forecast_miss_thr = forecast_miss_thr
 
         self.eval_version = eval_version
         # self.eval_detection_configs = config_factory(self.eval_version)
@@ -842,14 +846,224 @@ class KlMetric(BaseMetric):
             return metric_dict
 
         for metric in self.metrics:
-            ap_dict = self.kl_evaluate(
-                result_dict, classes=classes, metric=metric, logger=logger)
-            for result in ap_dict:
-                metric_dict[result] = ap_dict[result]
+            if metric == 'bbox':
+                ap_dict = self.kl_evaluate(
+                    result_dict, classes=classes, metric=metric,
+                    logger=logger)
+                for result in ap_dict:
+                    metric_dict[result] = ap_dict[result]
+            elif metric == 'forecasting':
+                forecast_dict = self.evaluate_forecasting(
+                    results, classes=classes, logger=logger)
+                metric_dict.update(forecast_dict)
+            else:
+                raise KeyError(f'Unsupported KL metric: {metric}')
 
         if tmp_dir is not None:
             tmp_dir.cleanup()
         return metric_dict
+
+    @staticmethod
+    def _to_numpy(data):
+        """Convert tensor-like data to numpy without changing scalars."""
+        if isinstance(data, torch.Tensor):
+            return data.detach().cpu().numpy()
+        return np.asarray(data)
+
+    @staticmethod
+    def _get_instance_label(instance: dict) -> int:
+        if 'bbox_label_3d' in instance:
+            return int(instance['bbox_label_3d'])
+        if 'bbox_label' in instance:
+            return int(instance['bbox_label'])
+        return -1
+
+    @staticmethod
+    def _normalize_sample_idx(sample_idx):
+        if isinstance(sample_idx, torch.Tensor):
+            sample_idx = sample_idx.item()
+        if isinstance(sample_idx, np.ndarray):
+            sample_idx = sample_idx.item()
+        return sample_idx
+
+    def evaluate_forecasting(
+            self,
+            results: List[dict],
+            classes: Optional[List[str]] = None,
+            logger: Optional[MMLogger] = None) -> Dict[str, float]:
+        """Evaluate per-object 6-step trajectory forecasts.
+
+        Predictions are matched to ground truth by current-frame center
+        distance and class label. The reported ADE/FDE are computed on
+        absolute future centers, i.e. current box center plus predicted/GT
+        displacement, so current detection localization error is included.
+        """
+        sample_to_info = {}
+        for idx, info in enumerate(self.data_infos):
+            sample_idx = info.get('sample_idx', idx)
+            sample_to_info[self._normalize_sample_idx(sample_idx)] = info
+
+        ades = []
+        fdes = []
+        misses = []
+        valid_steps = 0
+        matched_count = 0
+        gt_forecast_count = 0
+        horizon_errors = defaultdict(list)
+        class_errors = defaultdict(list)
+        has_forecasting_pred = False
+
+        for result in results:
+            sample_idx = self._normalize_sample_idx(result['sample_idx'])
+            info = sample_to_info.get(sample_idx, None)
+            if info is None:
+                continue
+
+            gt_instances = info.get('instances', [])
+            if len(gt_instances) == 0:
+                continue
+
+            gt_boxes = np.asarray([
+                inst.get('bbox_3d', np.zeros(7, dtype=np.float32))
+                for inst in gt_instances
+            ], dtype=np.float32)
+            gt_labels = np.asarray([
+                self._get_instance_label(inst) for inst in gt_instances
+            ], dtype=np.int64)
+
+            gt_traj_list = []
+            gt_mask_list = []
+            max_steps = 0
+            for inst in gt_instances:
+                locs = np.asarray(
+                    inst.get('gt_forecasting_locs',
+                             np.zeros((0, 2), dtype=np.float32)),
+                    dtype=np.float32)
+                mask = np.asarray(
+                    inst.get('gt_forecasting_mask',
+                             np.zeros((0, ), dtype=np.bool_)),
+                    dtype=np.bool_).reshape(-1)
+                if locs.ndim != 2 or locs.shape[-1] != 2:
+                    locs = np.zeros((0, 2), dtype=np.float32)
+                steps = min(locs.shape[0], mask.shape[0])
+                locs = locs[:steps]
+                mask = mask[:steps]
+                gt_traj_list.append(locs)
+                gt_mask_list.append(mask)
+                max_steps = max(max_steps, steps)
+
+            if max_steps == 0:
+                continue
+            gt_trajs = np.zeros(
+                (len(gt_instances), max_steps, 2), dtype=np.float32)
+            gt_masks = np.zeros(
+                (len(gt_instances), max_steps), dtype=np.bool_)
+            for gt_idx, (locs, mask) in enumerate(
+                    zip(gt_traj_list, gt_mask_list)):
+                steps = locs.shape[0]
+                gt_trajs[gt_idx, :steps] = locs
+                gt_masks[gt_idx, :steps] = mask
+
+            gt_has_forecast = gt_masks.any(axis=1)
+            gt_forecast_count += int(gt_has_forecast.sum())
+
+            pred = result['pred_instances_3d']
+            if 'forecasting_3d' not in pred:
+                continue
+            has_forecasting_pred = True
+
+            pred_boxes = self._to_numpy(pred['bboxes_3d'].tensor)
+            pred_scores = self._to_numpy(pred['scores_3d'])
+            pred_labels = self._to_numpy(pred['labels_3d']).astype(np.int64)
+            pred_trajs = self._to_numpy(pred['forecasting_3d'])
+
+            if pred_boxes.shape[0] == 0 or pred_trajs.shape[0] == 0:
+                continue
+
+            matched_gt = set()
+            for pred_idx in np.argsort(-pred_scores):
+                same_class_gt = np.where(
+                    gt_labels == pred_labels[pred_idx])[0]
+                candidates = [
+                    gt_idx for gt_idx in same_class_gt
+                    if gt_idx not in matched_gt and gt_has_forecast[gt_idx]
+                ]
+                if len(candidates) == 0:
+                    continue
+
+                dists = np.linalg.norm(
+                    gt_boxes[candidates, :2] - pred_boxes[pred_idx, :2],
+                    axis=1)
+                best_pos = int(np.argmin(dists))
+                gt_idx = candidates[best_pos]
+                if dists[best_pos] > self.forecast_match_dist_thr:
+                    continue
+
+                mask = gt_masks[gt_idx].astype(bool)
+                steps = min(pred_trajs.shape[1], gt_trajs.shape[1],
+                            mask.shape[0])
+                if steps == 0:
+                    continue
+                mask = mask[:steps]
+                if not mask.any():
+                    continue
+
+                pred_abs = (pred_boxes[pred_idx, None, :2] +
+                            pred_trajs[pred_idx, :steps, :2])
+                gt_abs = (gt_boxes[gt_idx, None, :2] +
+                          gt_trajs[gt_idx, :steps, :2])
+                err = np.linalg.norm(pred_abs - gt_abs, axis=-1)
+                valid_err = err[mask]
+
+                ade = float(valid_err.mean())
+                fde = float(valid_err[-1])
+                ades.append(ade)
+                fdes.append(fde)
+                misses.append(float(fde > self.forecast_miss_thr))
+                valid_steps += int(mask.sum())
+                matched_count += 1
+                matched_gt.add(gt_idx)
+
+                label = int(gt_labels[gt_idx])
+                if classes is not None and 0 <= label < len(classes):
+                    class_errors[classes[label]].append(ade)
+                for step_idx, step_err in enumerate(err[:steps]):
+                    if mask[step_idx]:
+                        horizon_errors[step_idx + 1].append(float(step_err))
+
+        if logger is not None and not has_forecasting_pred:
+            logger.warning('No forecasting_3d field found in predictions. '
+                           'Forecasting metrics will be zero.')
+
+        metric_prefix = 'pred_instances_3d_kl/forecast'
+        detail = {
+            f'{metric_prefix}/mADE':
+            float(np.mean(ades)) if ades else 0.0,
+            f'{metric_prefix}/mFDE':
+            float(np.mean(fdes)) if fdes else 0.0,
+            f'{metric_prefix}/MR_{self.forecast_miss_thr:g}m':
+            float(np.mean(misses)) if misses else 0.0,
+            f'{metric_prefix}/recall':
+            float(matched_count / max(gt_forecast_count, 1)),
+            f'{metric_prefix}/matched_count':
+            float(matched_count),
+            f'{metric_prefix}/gt_count':
+            float(gt_forecast_count),
+            f'{metric_prefix}/valid_steps':
+            float(valid_steps),
+        }
+
+        for step_idx in sorted(horizon_errors):
+            values = horizon_errors[step_idx]
+            detail[f'{metric_prefix}/ADE_t{step_idx}'] = (
+                float(np.mean(values)) if values else 0.0)
+
+        for class_name in classes or []:
+            values = class_errors.get(class_name, [])
+            detail[f'{metric_prefix}/{class_name}_ADE'] = (
+                float(np.mean(values)) if values else 0.0)
+
+        return detail
 
     def kl_evaluate(self,
                      result_dict: dict,
