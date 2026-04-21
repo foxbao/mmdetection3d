@@ -589,7 +589,7 @@ def update_kl_infos(pkl_path, out_dir):
     metainfo['info_version'] = '1.1'
     src_metadata = data_list.get('metadata', {})
     metainfo['lidar_coord_frame'] = src_metadata.get(
-        'lidar_coord_frame', 'RFU')
+        'lidar_coord_frame', 'FLU')
     converted_data_info = dict(metainfo=metainfo, data_list=converted_list)
 
     mmengine.dump(converted_data_info, out_path, 'pkl')

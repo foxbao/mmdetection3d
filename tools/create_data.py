@@ -119,6 +119,17 @@ def kl_data_prep(root_path,
     add_forecasting_to_pkl(info_train_path, forecast_steps=6)
     add_forecasting_to_pkl(info_val_path, forecast_steps=6)
 
+    # Add nuScenes-style object velocities from track_id trajectories.  Keep the
+    # original pkl names untouched and write explicit velocity variants so
+    # configs can opt in without changing other KL experiments.
+    from tools.dataset_converters.add_velocity import add_velocity_to_pkl
+    info_train_vel_path = osp.join(
+        out_dir, f'{info_prefix}_infos_train_with_velocity.pkl')
+    info_val_vel_path = osp.join(
+        out_dir, f'{info_prefix}_infos_val_with_velocity.pkl')
+    add_velocity_to_pkl(info_train_path, out_path=info_train_vel_path)
+    add_velocity_to_pkl(info_val_path, out_path=info_val_vel_path)
+
     create_groundtruth_database(dataset_name, root_path, info_prefix,
                                 f'{info_prefix}_infos_train.pkl')
 

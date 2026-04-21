@@ -29,13 +29,17 @@ from pathlib import Path
 
 MAX_DISPLACEMENT = 100.0  # metres; reject per-step displacements beyond this
 
-# KL dataset: LiDAR frame is RFU (col-0=Right, col-1=Forward, col-2=Up);
-# ego frame (used by ego2global) is FLU (X=Forward, Y=Left, Z=Up).
-# GT boxes (bbox_3d) are stored in the LiDAR RFU frame.
-# lidar2ego = 90° rotation about Z:
-LIDAR2EGO = np.eye(4, dtype=np.float64)
-LIDAR2EGO[:2, :2] = np.array([[0.0, 1.0],
-                              [-1.0, 0.0]])
+# KL LiDAR frame is determined by pkl metainfo['lidar_coord_frame'] ∈
+# {'FLU', 'RFU'}. LIDAR2EGO is identity for FLU (sensor=ego) and a 90°
+# Z-rotation for legacy RFU pkls. The matrix is (re)built per pkl by
+# `_lidar2ego_from_frame` inside `add_forecasting_to_pkl`.
+def _lidar2ego_from_frame(frame: str) -> np.ndarray:
+    M = np.eye(4, dtype=np.float64)
+    if frame == 'RFU':
+        M[:2, :2] = np.array([[0.0, 1.0], [-1.0, 0.0]])
+    elif frame != 'FLU':
+        raise ValueError(f'unknown lidar_coord_frame: {frame!r}')
+    return M
 
 
 def build_indices(infos):
@@ -61,8 +65,10 @@ def build_indices(infos):
 
 
 def compute_forecasting(infos, token_to_idx, token_tid_to_box,
-                         forecast_steps=6):
+                         forecast_steps=6, lidar2ego=None):
     """Add gt_forecasting_locs and gt_forecasting_mask to each instance."""
+    if lidar2ego is None:
+        lidar2ego = np.eye(4, dtype=np.float64)
     num_found = 0
     num_total = 0
     num_rejected_scene = 0
@@ -70,13 +76,13 @@ def compute_forecasting(infos, token_to_idx, token_tid_to_box,
 
     for info in mmengine.track_iter_progress(infos):
         ego2global_curr = np.array(info['ego2global'], dtype=np.float64)
-        lidar2global_curr = ego2global_curr @ LIDAR2EGO
+        lidar2global_curr = ego2global_curr @ lidar2ego
         global2lidar_curr = np.linalg.inv(lidar2global_curr)
         curr_scene = info.get('scene_token', '')
 
         for inst in info.get('instances', []):
             tid = inst.get('track_id', -1)
-            curr_xy = inst['bbox_3d'][:2]  # (x, y) in current LiDAR RFU frame
+            curr_xy = inst['bbox_3d'][:2]  # (x, y) in current LiDAR frame
 
             locs = []
             mask = []
@@ -105,7 +111,7 @@ def compute_forecasting(infos, token_to_idx, token_tid_to_box,
                 key = (future_token, tid)
 
                 if tid >= 0 and key in token_tid_to_box:
-                    # Future position in future LiDAR RFU frame
+                    # Future position in future LiDAR frame
                     fut_box = token_tid_to_box[key]
                     pos_fut_lidar = np.array(
                         [fut_box[0], fut_box[1], fut_box[2], 1.0],
@@ -114,7 +120,7 @@ def compute_forecasting(infos, token_to_idx, token_tid_to_box,
                     # Future LiDAR → global → current LiDAR
                     ego2global_fut = np.array(
                         future_info['ego2global'], dtype=np.float64)
-                    lidar2global_fut = ego2global_fut @ LIDAR2EGO
+                    lidar2global_fut = ego2global_fut @ lidar2ego
                     pos_global = lidar2global_fut @ pos_fut_lidar
                     pos_curr = global2lidar_curr @ pos_global
 
@@ -153,7 +159,9 @@ def add_forecasting_to_pkl(pkl_path, forecast_steps=6):
 
     data = mmengine.load(pkl_path)
     infos = data['data_list']
-    print(f'Total frames: {len(infos)}')
+    frame = data.get('metainfo', {}).get('lidar_coord_frame', 'FLU')
+    lidar2ego = _lidar2ego_from_frame(frame)
+    print(f'Total frames: {len(infos)}  lidar_coord_frame: {frame}')
 
     # Build indices
     token_to_idx, token_tid_to_box = build_indices(infos)
@@ -161,7 +169,8 @@ def add_forecasting_to_pkl(pkl_path, forecast_steps=6):
 
     # Compute forecasting
     num_found, num_total, rej_scene, rej_range = compute_forecasting(
-        infos, token_to_idx, token_tid_to_box, forecast_steps)
+        infos, token_to_idx, token_tid_to_box, forecast_steps,
+        lidar2ego=lidar2ego)
 
     hit_rate = num_found / max(num_total, 1) * 100
     print(f'Future track matches: {num_found}/{num_total} ({hit_rate:.1f}%)')

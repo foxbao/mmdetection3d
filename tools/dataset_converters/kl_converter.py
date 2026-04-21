@@ -409,11 +409,12 @@ def process_cameras(frame_info, frame_id, scale=1.0 / 3.0):
         # ---------------------------------------------
         # 2. 坐标系差异说明
         # ---------------------------------------------
-        # 原 LiDAR 坐标系: x->前, y->左, z->上
-        # nuScenes 坐标系: x->右, y->前, z->上
-        # 因此需要绕 Z 轴旋转 90° 来对齐
+        # 原 LiDAR 坐标系: x->前, y->左, z->上 (FLU)
+        # 若目标 LiDAR 系是 RFU (x->右, y->前) 需要绕 Z 轴 +90° 对齐;
+        # 若目标是 FLU 则与原始一致, 不做旋转。
         T_lidar_orig_to_nus = np.eye(4)
-        T_lidar_orig_to_nus[:3, :3] = make_yaw_rotation(90)
+        if frame_info.get('coord_transform', False):
+            T_lidar_orig_to_nus[:3, :3] = make_yaw_rotation(90)
 
         # ---------------------------------------------
         # 3. 数学关系推导（重点，保留原推导）
@@ -857,7 +858,7 @@ def summarize_sync_infos(infos, out_path):
 
 # ------------------- 主函数 -------------------
 def generate_frame_bin_parallel(data_root, info_prefix, version,
-                                target_lidar_frame: str = 'RFU',
+                                target_lidar_frame: str = 'FLU',
                                 max_diff=0.05, cfg=None):
     assert target_lidar_frame in ('RFU', 'FLU'), (
         f"target_lidar_frame must be 'RFU' or 'FLU', got {target_lidar_frame!r}")

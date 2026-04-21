@@ -15,7 +15,7 @@ import mmengine
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('pkl', nargs='+', help='pkl file(s) to patch')
-    parser.add_argument('--frame', default='RFU', choices=['RFU', 'FLU'])
+    parser.add_argument('--frame', default='FLU', choices=['RFU', 'FLU'])
     args = parser.parse_args()
 
     for path in args.pkl:
