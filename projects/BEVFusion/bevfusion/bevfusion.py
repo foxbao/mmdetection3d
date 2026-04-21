@@ -33,6 +33,7 @@ class BEVFusion(Base3DDetector):
         pts_neck: Optional[dict] = None,
         temporal_fuser: Optional[dict] = None,
         bbox_head: Optional[dict] = None,
+        motion_head: Optional[dict] = None,
         init_cfg: OptMultiConfig = None,
         seg_head: Optional[dict] = None,
         **kwargs,
@@ -72,6 +73,8 @@ class BEVFusion(Base3DDetector):
             temporal_fuser) if temporal_fuser is not None else None
 
         self.bbox_head = MODELS.build(bbox_head)
+        self.motion_head = MODELS.build(
+            motion_head) if motion_head is not None else None
 
         self.init_weights()
 
@@ -253,6 +256,9 @@ class BEVFusion(Base3DDetector):
             else:
                 outputs = self.bbox_head.predict(feats, batch_input_metas)
 
+        if self.motion_head is not None:
+            self.bbox_head.predict_motion(outputs, self.motion_head)
+
         res = self.add_pred_to_datasample(batch_data_samples, outputs)
 
         return res
@@ -373,22 +379,39 @@ class BEVFusion(Base3DDetector):
 
             # Points for this adj frame across the batch
             frame_pts = raw_pts[frame_idx]  # already [batch] after transpose
-            if any(p is None for p in frame_pts):
+            valid_indices = [
+                idx for idx, pts in enumerate(frame_pts) if pts is not None
+            ]
+            if len(valid_indices) == 0:
                 adj_bevs.append(None)
                 continue
 
             # Extract BEV for this adj frame (no temporal fusion, no grad)
+            # Missing history is handled per sample: extract only valid
+            # samples, then scatter them back into a zero-padded full batch.
             adj_batch = dict(batch_inputs_dict)
             adj_batch['points'] = [
-                p.to(device).contiguous() for p in frame_pts]
+                frame_pts[idx].to(device).contiguous()
+                for idx in valid_indices
+            ]
+            adj_metas = [batch_input_metas[idx] for idx in valid_indices]
 
             with torch.no_grad():
                 adj_bev = self._extract_single_frame_bev(
-                    adj_batch, batch_input_metas)
+                    adj_batch, adj_metas)
             if isinstance(adj_bev, (list, tuple)):
-                adj_bev = [t.detach() for t in adj_bev]
+                padded_bev = []
+                for tensor in adj_bev:
+                    padded = tensor.new_zeros(
+                        (batch_size, ) + tuple(tensor.shape[1:]))
+                    padded[valid_indices] = tensor
+                    padded_bev.append(padded.detach())
+                adj_bev = padded_bev
             else:
-                adj_bev = adj_bev.detach()
+                padded = adj_bev.new_zeros(
+                    (batch_size, ) + tuple(adj_bev.shape[1:]))
+                padded[valid_indices] = adj_bev
+                adj_bev = padded.detach()
             adj_bevs.append(adj_bev)
 
         # Source the lidar coord frame from pkl metainfo (carried in
@@ -417,5 +440,10 @@ class BEVFusion(Base3DDetector):
                 bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
 
         losses.update(bbox_loss)
+
+        if self.motion_head is not None:
+            motion_loss = self.bbox_head.loss_motion(
+                batch_data_samples, self.motion_head)
+            losses.update(motion_loss)
 
         return losses

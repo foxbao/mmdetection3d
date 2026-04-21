@@ -55,11 +55,14 @@ class TemporalBEVFuser(nn.Module):
         operates on normalised BEV grid coordinates (as required by
         ``F.affine_grid``).
 
-        ego_motion maps a point from the historical frame into the current
-        frame:  p_curr = ego_motion @ p_hist  (in LiDAR metres).
+        ``ego_motion`` maps an output-frame point to the source-frame point
+        that should be sampled:
+            p_src = ego_motion @ p_out  (in LiDAR metres).
 
-        We need to express this as an affine transform on the *pixel* grid
-        of the BEV feature map (H, W) with normalised coords in [-1, 1].
+        BEVFusionSparseEncoder stores BEV tensors as (B, C, H, W), where
+        H follows physical X and W follows physical Y.  ``affine_grid`` uses
+        normalized grid coordinates ordered as (column, row), so the grid
+        vector is [norm_y, norm_x], not [norm_x, norm_y].
 
         Args:
             ego_motion: (B, 4, 4) float tensor.
@@ -68,21 +71,40 @@ class TemporalBEVFuser(nn.Module):
         Returns:
             theta: (B, 2, 3) affine matrix for ``F.affine_grid``.
         """
-        # Extract 2D rotation and translation (XY plane only).
-        # BEV feature map axes:  dim-W ↔ X,  dim-H ↔ Y
+        # Extract 2D rotation and translation in physical [x, y] metres.
         R = ego_motion[:, :2, :2]   # (B, 2, 2)
         t = ego_motion[:, :2, 3]    # (B, 2)    [tx, ty] in metres
 
-        # Convert metre translation to normalised grid units.
-        # normalised_x = metre_x / half_range_x  (maps [-range, range] → [-1, 1])
-        half_x = (self.x_max - self.x_min) / 2.0
-        half_y = (self.y_max - self.y_min) / 2.0
+        dtype = ego_motion.dtype
+        device = ego_motion.device
+        half_x = torch.tensor(
+            (self.x_max - self.x_min) / 2.0, dtype=dtype, device=device)
+        half_y = torch.tensor(
+            (self.y_max - self.y_min) / 2.0, dtype=dtype, device=device)
+        center = torch.tensor(
+            [(self.x_min + self.x_max) / 2.0,
+             (self.y_min + self.y_max) / 2.0],
+            dtype=dtype,
+            device=device)
 
-        t_norm = torch.stack([t[:, 0] / half_x,
-                              t[:, 1] / half_y], dim=-1)  # (B, 2)
+        # q = meter_to_grid @ (p - center), where
+        # p = [x, y] and q = [grid_col(norm_y), grid_row(norm_x)].
+        meter_to_grid = torch.zeros(2, 2, dtype=dtype, device=device)
+        meter_to_grid[0, 1] = 1.0 / half_y
+        meter_to_grid[1, 0] = 1.0 / half_x
+        grid_to_meter = torch.zeros(2, 2, dtype=dtype, device=device)
+        grid_to_meter[0, 1] = half_x
+        grid_to_meter[1, 0] = half_y
 
-        # Build 2×3 affine: [R | t_norm]
-        theta = torch.cat([R, t_norm.unsqueeze(-1)], dim=-1)  # (B, 2, 3)
+        # Convert p_src = R @ p_out + t from metre coordinates to normalized
+        # grid coordinates.  The center term keeps non-zero-centered BEV ranges
+        # correct as well.
+        theta_R = meter_to_grid @ R @ grid_to_meter
+        center_src = torch.einsum('bij,j->bi', R, center) + t
+        theta_t = (meter_to_grid @ (center_src - center).T).T
+
+        theta = torch.cat(
+            [theta_R, theta_t.unsqueeze(-1)], dim=-1)  # (B, 2, 3)
         return theta
 
     def warp_bev(self, bev: torch.Tensor,

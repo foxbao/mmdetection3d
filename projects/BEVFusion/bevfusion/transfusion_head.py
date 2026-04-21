@@ -295,6 +295,8 @@ class TransFusionHead(nn.Module):
             # for next level positional embedding
             query_pos = res_layer['center'].detach().clone().permute(0, 2, 1)
 
+        self._last_query_feat = query_feat
+
         ret_dicts[0]['query_heatmap_score'] = heatmap.gather(
             index=top_proposals_index[:,
                                       None, :].expand(-1, self.num_classes,
@@ -480,11 +482,18 @@ class TransFusionHead(nn.Module):
                 else:  # no nms
                     ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
 
+                if self.test_cfg['nms_type'] is not None:
+                    keep_inds = torch.where(keep_mask)[0]
+                else:
+                    keep_inds = torch.arange(len(scores),
+                                             device=scores.device)
+
                 temp_instances = InstanceData()
                 temp_instances.bboxes_3d = metas[0]['box_type_3d'](
                     ret['bboxes'], box_dim=ret['bboxes'].shape[-1])
                 temp_instances.scores_3d = ret['scores']
                 temp_instances.labels_3d = ret['labels'].int()
+                temp_instances._keep_inds = keep_inds
 
                 ret_layer.append(temp_instances)
 
@@ -550,6 +559,9 @@ class TransFusionHead(nn.Module):
         num_pos = np.sum(res_tuple[5])
         matched_ious = np.mean(res_tuple[6])
         heatmap = torch.cat(res_tuple[7], dim=0)
+
+        self._cached_assign = list(zip(res_tuple[8], res_tuple[9]))
+
         return (
             labels,
             label_weights,
@@ -734,6 +746,12 @@ class TransFusionHead(nn.Module):
                                       center_int[[1, 0]], radius)
 
         mean_iou = ious[pos_inds].sum() / max(len(pos_inds), 1)
+
+        last_start = (num_layer - 1) * self.num_proposals
+        last_mask = pos_inds >= last_start
+        last_pos_inds = pos_inds[last_mask] - last_start
+        last_pos_gt_inds = sampling_result.pos_assigned_gt_inds[last_mask]
+
         return (
             labels[None],
             label_weights[None],
@@ -743,6 +761,8 @@ class TransFusionHead(nn.Module):
             int(pos_inds.shape[0]),
             float(mean_iou),
             heatmap[None],
+            last_pos_inds,
+            last_pos_gt_inds,
         )
 
     def loss(self, batch_feats, batch_data_samples):
@@ -905,3 +925,41 @@ class TransFusionHead(nn.Module):
         loss_dict['matched_ious'] = layer_loss_cls.new_tensor(matched_ious)
 
         return loss_dict
+
+    def loss_motion(self, batch_data_samples, motion_head):
+        """Compute motion/trajectory loss using cached query features."""
+        query_feat = self._last_query_feat  # (B, C, N)
+        traj_preds = motion_head(query_feat)  # (B, N, 6, 2)
+
+        B, _, N = query_feat.shape
+        device = query_feat.device
+        S = motion_head.forecast_steps
+
+        gt_traj = torch.zeros(B, N, S, 2, device=device)
+        gt_mask = torch.zeros(B, N, S, device=device)
+        proposal_mask = torch.zeros(B, N, device=device)
+
+        for b in range(B):
+            pos_inds, pos_gt_inds = self._cached_assign[b]
+            gt_inst = batch_data_samples[b].gt_instances_3d
+            if not hasattr(gt_inst, 'forecasting_locs'):
+                continue
+            fl = gt_inst.forecasting_locs.float().to(device)  # (G, 6, 2)
+            fm = gt_inst.forecasting_mask.float().to(device)  # (G, 6)
+            if len(pos_inds) == 0:
+                continue
+            gt_traj[b, pos_inds] = fl[pos_gt_inds]
+            gt_mask[b, pos_inds] = fm[pos_gt_inds].float()
+            proposal_mask[b, pos_inds] = 1.0
+
+        return motion_head.loss(traj_preds, gt_traj, gt_mask, proposal_mask)
+
+    def predict_motion(self, outputs, motion_head):
+        """Attach trajectory predictions to output InstanceData."""
+        query_feat = self._last_query_feat
+        traj_preds = motion_head(query_feat)  # (B, N, 6, 2)
+
+        for b, inst in enumerate(outputs):
+            keep = inst._keep_inds
+            inst.forecasting_3d = traj_preds[b, keep]
+            del inst._keep_inds
