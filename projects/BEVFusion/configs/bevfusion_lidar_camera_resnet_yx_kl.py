@@ -1,8 +1,8 @@
 _base_ = [
-    './bevfusion_yx_kl.py'
+    './bevfusion_lidar_kl_base.py'
 ]
 # point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
-point_cloud_range = [-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]
+point_cloud_range = [-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]
 input_modality = dict(use_lidar=True, use_camera=True)
 backend_args = None
 
@@ -208,7 +208,7 @@ test_pipeline = [
     dict(
         type='PointsRangeFilter',
         # point_cloud_range=[-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]),
-        point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]),
+        point_cloud_range=[-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]),
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],

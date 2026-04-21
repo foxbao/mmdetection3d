@@ -8,7 +8,7 @@ custom_imports = dict(
 # If point cloud range is modified, do remember to change all related
 # keys in the config.
 voxel_size = [0.1, 0.1, 0.2]
-point_cloud_range = [-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]
+point_cloud_range = [-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]
 
 class_names = [
     "Pedestrian", 
@@ -57,7 +57,7 @@ model = dict(
         pad_size_divisor=32,
         voxelize_cfg=dict(
             max_num_points=10,
-            point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0],
+            point_cloud_range=[-80.0, -48.0, -2.0, 80.0, 48.0, 6.0],
             voxel_size=[0.1, 0.1, 0.2],
             max_voxels=[120000, 160000],
             voxelize_reduce=True)),
@@ -65,7 +65,7 @@ model = dict(
     pts_middle_encoder=dict(
         type='BEVFusionSparseEncoder',
         in_channels=4,
-        sparse_shape=[960, 1600, 41],
+        sparse_shape=[1600, 960, 41],
         order=('conv', 'norm', 'act'),
         norm_cfg=dict(type='BN1d', eps=0.001, momentum=0.01),
         encoder_channels=((16, 16, 32), (32, 32, 64), (64, 64, 128), (128,
@@ -113,8 +113,8 @@ model = dict(
             pos_encoding_cfg=dict(input_channel=2, num_pos_feats=128)),
         train_cfg=dict(
             dataset='nuScenes',
-            point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0],
-            grid_size=[960, 1600, 41],
+            point_cloud_range=[-80.0, -48.0, -2.0, 80.0, 48.0, 6.0],
+            grid_size=[1600, 960, 41],
             voxel_size=[0.1, 0.1, 0.2],
             out_size_factor=8,
             gaussian_overlap=0.1,
@@ -134,17 +134,17 @@ model = dict(
                 iou_cost=dict(type='IoU3DCost', weight=0.25))),
         test_cfg=dict(
             dataset='nuScenes',
-            grid_size=[960, 1600, 41],
+            grid_size=[1600, 960, 41],
             out_size_factor=8,
             voxel_size=[0.1, 0.1],
-            pc_range=[-48.0, -80.0],
+            pc_range=[-80.0, -48.0],
             nms_type=None),
         common_heads=dict(
             center=[2, 2], height=[1, 2], dim=[3, 2], rot=[2, 2], vel=[2, 2]),
         bbox_coder=dict(
             type='TransFusionBBoxCoder',
-            pc_range=[-48.0, -80.0],
-            post_center_range=[-48.0, -80.0, -10.0, 48.0, 80.0, 10.0],
+            pc_range=[-80.0, -48.0],
+            post_center_range=[-80.0, -48.0, -10.0, 80.0, 48.0, 10.0],
             score_threshold=0.0,
             out_size_factor=8,
             voxel_size=[0.1, 0.1],
@@ -275,7 +275,7 @@ test_pipeline = [
         backend_args=backend_args),
     dict(
         type='PointsRangeFilter',
-        point_cloud_range=[-48.0, -80.0, -2.0, 48.0, 80.0, 6.0]),
+        point_cloud_range=[-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]),
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d'],
@@ -387,7 +387,7 @@ param_scheduler = [
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=6)
 val_cfg = dict()
 test_cfg = dict()
 
