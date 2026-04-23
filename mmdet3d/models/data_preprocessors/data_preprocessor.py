@@ -205,8 +205,9 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
                     imgs, data_samples = batch_aug(imgs, data_samples)
             batch_inputs['imgs'] = imgs
 
-        # Pass through temporal data (adj_points, adj_ego_motions) if present
-        for temporal_key in ('adj_points', 'adj_ego_motions'):
+        # Pass through temporal point-cloud data if present.
+        for temporal_key in ('adj_points', 'adj_ego_motions', 'prev_points',
+                             'prev_points_queue'):
             if temporal_key in inputs:
                 batch_inputs[temporal_key] = inputs[temporal_key]
 

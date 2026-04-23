@@ -975,6 +975,20 @@ class PointsRangeFilter(BaseTransform):
                 filtered.append(adj_pts[mask])
             input_dict['adj_points'] = filtered
 
+        if input_dict.get('prev_points', None) is not None:
+            prev_mask = input_dict['prev_points'].in_range_3d(self.pcd_range)
+            input_dict['prev_points'] = input_dict['prev_points'][prev_mask]
+
+        if 'prev_points_queue' in input_dict:
+            filtered_queue = []
+            for prev_points in input_dict['prev_points_queue']:
+                if prev_points is None:
+                    filtered_queue.append(None)
+                    continue
+                prev_mask = prev_points.in_range_3d(self.pcd_range)
+                filtered_queue.append(prev_points[prev_mask])
+            input_dict['prev_points_queue'] = filtered_queue
+
         return input_dict
 
     def __repr__(self) -> str:

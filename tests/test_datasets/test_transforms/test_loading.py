@@ -10,6 +10,8 @@ from mmdet3d.datasets.transforms.loading import (LoadAnnotations3D,
                                                  LoadPointsFromFile)
 from mmdet3d.structures import DepthPoints, LiDARPoints
 from mmdet3d.testing import create_dummy_data_info
+from projects.BEVFusion.bevfusion.temporal_loading import (
+    LoadPrevFramePoints, LoadPrevFrameQueuePoints)
 
 
 class TestLoadPointsFromFile(unittest.TestCase):
@@ -96,6 +98,67 @@ class TestLoadAnnotations3D(unittest.TestCase):
         self.assertIn('with_label_3d=True', repr_str)
         self.assertIn('with_bbox_depth=False', repr_str)
         self.assertIn('with_panoptic_3d=True', repr_str)
+
+
+class TestLoadPrevFramePoints(unittest.TestCase):
+
+    def test_load_prev_frame_points(self):
+        data_info = create_dummy_data_info()
+        lidar_path = data_info['lidar_points']['lidar_path']
+        data_info['prev_info'] = dict(
+            lidar_path=lidar_path,
+            ego2global=np.eye(4, dtype=np.float32),
+            timestamp=0.0)
+        data_info['timestamp'] = 0.1
+
+        transform = LoadPrevFramePoints(
+            coord_type='LIDAR',
+            load_dim=4,
+            use_dim=3,
+            backend_args=None)
+        info = transform(data_info)
+        self.assertIn('prev_points', info)
+        self.assertIsInstance(info['prev_points'], LiDARPoints)
+        self.assertEqual(info['prev_points'].shape[-1], 3)
+        self.assertIn('prev_ego2global', info)
+        self.assertTrue(info['prev_bev_exists'])
+
+    def test_prev_frame_missing_is_cold_start(self):
+        data_info = create_dummy_data_info()
+        transform = LoadPrevFramePoints(
+            coord_type='LIDAR',
+            load_dim=4,
+            use_dim=3,
+            backend_args=None)
+        info = transform(data_info)
+        self.assertIsNone(info['prev_points'])
+        self.assertIsNone(info['prev_ego2global'])
+        self.assertFalse(info['prev_bev_exists'])
+
+    def test_load_prev_frame_queue_points(self):
+        data_info = create_dummy_data_info()
+        lidar_path = data_info['lidar_points']['lidar_path']
+        data_info['prev_infos'] = [
+            None,
+            dict(
+                lidar_path=lidar_path,
+                ego2global=np.eye(4, dtype=np.float32),
+                timestamp=0.0)
+        ]
+        data_info['timestamp'] = 0.1
+
+        transform = LoadPrevFrameQueuePoints(
+            coord_type='LIDAR',
+            load_dim=4,
+            use_dim=3,
+            backend_args=None)
+        info = transform(data_info)
+        self.assertIn('prev_points_queue', info)
+        self.assertEqual(len(info['prev_points_queue']), 2)
+        self.assertIsNone(info['prev_points_queue'][0])
+        self.assertIsInstance(info['prev_points_queue'][1], LiDARPoints)
+        self.assertEqual(
+            info['prev_bev_exists_queue'], [False, True])
 
 
 class TestPointSegClassMapping(unittest.TestCase):

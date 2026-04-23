@@ -252,7 +252,10 @@ class TransFusionHead(nn.Module):
         # top num_proposals among all classes
         top_proposals = heatmap.view(batch_size, -1).argsort(
             dim=-1, descending=True)[..., :self.num_proposals]
-        top_proposals_class = top_proposals // heatmap.shape[-1]
+        top_proposals_class = torch.div(
+            top_proposals,
+            heatmap.shape[-1],
+            rounding_mode='trunc')
         top_proposals_index = top_proposals % heatmap.shape[-1]
         query_feat = fusion_feat_flatten.gather(
             index=top_proposals_index[:, None, :].expand(
@@ -296,6 +299,8 @@ class TransFusionHead(nn.Module):
             query_pos = res_layer['center'].detach().clone().permute(0, 2, 1)
 
         self._last_query_feat = query_feat
+        self._last_bev_feat = fusion_feat
+        self._last_query_pos = query_pos
 
         ret_dicts[0]['query_heatmap_score'] = heatmap.gather(
             index=top_proposals_index[:,
@@ -320,6 +325,21 @@ class TransFusionHead(nn.Module):
             else:
                 new_res[key] = ret_dicts[0][key]
         return [new_res]
+
+    def export_detection_context(self):
+        """Expose reusable detection-side context for downstream tasks.
+
+        This keeps downstream modules from depending directly on private cache
+        names. The returned tensors are the most recent outputs produced by the
+        detection forward path.
+        """
+        return dict(
+            det_queries=getattr(self, '_last_query_feat', None),
+            det_query_pos=getattr(self, '_last_query_pos', None),
+            bev_memory=getattr(self, '_last_bev_feat', None),
+            query_labels=getattr(self, 'query_labels', None),
+            assign_result=getattr(self, '_cached_assign', None),
+        )
 
     def forward(self, feats, metas):
         """Forward pass.
@@ -710,8 +730,10 @@ class TransFusionHead(nn.Module):
         grid_size = torch.tensor(self.train_cfg['grid_size'])
         pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
         voxel_size = torch.tensor(self.train_cfg['voxel_size'])
-        feature_map_size = (grid_size[:2] // self.train_cfg['out_size_factor']
-                            )  # [x_len, y_len]
+        feature_map_size = torch.div(
+            grid_size[:2],
+            self.train_cfg['out_size_factor'],
+            rounding_mode='trunc')  # [x_len, y_len]
         # 陈旭 chenxu:不改kl就训不出来
         # heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
         #                                  feature_map_size[0])
@@ -926,10 +948,15 @@ class TransFusionHead(nn.Module):
 
         return loss_dict
 
-    def loss_motion(self, batch_data_samples, motion_head):
-        """Compute motion/trajectory loss using cached query features."""
-        query_feat = self._last_query_feat  # (B, C, N)
-        traj_preds = motion_head(query_feat)  # (B, N, 6, 2)
+    def loss_motion(self, batch_data_samples, motion_head, scene_context=None):
+        """Compute motion/trajectory loss from explicit scene context."""
+        if scene_context is None:
+            scene_context = self.export_detection_context()
+
+        query_feat = scene_context['det_queries']  # (B, C, N)
+        bev_feat = scene_context.get('bev_memory', None)
+        query_pos = scene_context.get('det_query_pos', None)
+        cached_assign = scene_context.get('assign_result', self._cached_assign)
 
         B, _, N = query_feat.shape
         device = query_feat.device
@@ -940,7 +967,7 @@ class TransFusionHead(nn.Module):
         proposal_mask = torch.zeros(B, N, device=device)
 
         for b in range(B):
-            pos_inds, pos_gt_inds = self._cached_assign[b]
+            pos_inds, pos_gt_inds = cached_assign[b]
             gt_inst = batch_data_samples[b].gt_instances_3d
             if not hasattr(gt_inst, 'forecasting_locs'):
                 continue
@@ -952,11 +979,48 @@ class TransFusionHead(nn.Module):
             gt_mask[b, pos_inds] = fm[pos_gt_inds].float()
             proposal_mask[b, pos_inds] = 1.0
 
+        if getattr(motion_head, 'use_bev_context', False):
+            traj_preds, mode_logits = motion_head(query_feat, bev_feat,
+                                                 query_pos)
+            return motion_head.loss(traj_preds, mode_logits, gt_traj, gt_mask,
+                                    proposal_mask)
+        if hasattr(motion_head, 'predict'):
+            traj_preds, mode_logits = motion_head(query_feat)
+            return motion_head.loss(traj_preds, mode_logits, gt_traj, gt_mask,
+                                    proposal_mask)
+
+        traj_preds = motion_head(query_feat)  # (B, N, 6, 2)
         return motion_head.loss(traj_preds, gt_traj, gt_mask, proposal_mask)
 
-    def predict_motion(self, outputs, motion_head):
+    def predict_motion(self, outputs, motion_head, scene_context=None):
         """Attach trajectory predictions to output InstanceData."""
-        query_feat = self._last_query_feat
+        if scene_context is None:
+            scene_context = self.export_detection_context()
+
+        query_feat = scene_context['det_queries']
+        bev_feat = scene_context.get('bev_memory', None)
+        query_pos = scene_context.get('det_query_pos', None)
+
+        if getattr(motion_head, 'use_bev_context', False):
+            best_traj, all_traj, mode_logits = motion_head.predict(
+                query_feat, bev_feat, query_pos)
+            for b, inst in enumerate(outputs):
+                keep = inst._keep_inds
+                inst.forecasting_3d = best_traj[b, keep]
+                inst.forecasting_multi_3d = all_traj[b, keep]
+                inst.forecasting_scores = mode_logits[b, keep].softmax(dim=-1)
+                del inst._keep_inds
+            return
+        if hasattr(motion_head, 'predict'):
+            best_traj, all_traj, mode_logits = motion_head.predict(query_feat)
+            for b, inst in enumerate(outputs):
+                keep = inst._keep_inds
+                inst.forecasting_3d = best_traj[b, keep]
+                inst.forecasting_multi_3d = all_traj[b, keep]
+                inst.forecasting_scores = mode_logits[b, keep].softmax(dim=-1)
+                del inst._keep_inds
+            return
+
         traj_preds = motion_head(query_feat)  # (B, N, 6, 2)
 
         for b, inst in enumerate(outputs):

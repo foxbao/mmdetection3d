@@ -15,7 +15,7 @@ model = dict(
 train_dataloader = dict(
     dataset=dict(
         dataset=dict(
-            ann_file='kl_infos_train_with_velocity.pkl',
+            ann_file='kl_infos_train.pkl',
             pipeline=[
                 dict(
                     type='LoadPointsFromFile',
@@ -73,7 +73,7 @@ train_dataloader = dict(
             ])))
 
 val_dataloader = dict(
-    dataset=dict(ann_file='kl_infos_val_with_velocity.pkl'))
+    dataset=dict(ann_file='kl_infos_val.pkl'))
 test_dataloader = val_dataloader
 
 val_evaluator = dict(

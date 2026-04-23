@@ -345,49 +345,40 @@ visualizer = dict(
 # learning rate
 lr = 0.0001
 param_scheduler = [
-    # learning rate scheduler
-    # During the first 8 epochs, learning rate increases from 0 to lr * 10
-    # during the next 12 epochs, learning rate decreases from lr * 10 to
-    # lr * 1e-2 (minimum lr = 1e-6, NOT near-zero)
+    # 24-epoch schedule: 0-10 warmup, 10-24 cosine decay.
     dict(
-        type='CosineAnnealingLR',
-        T_max=8,
-        eta_min=lr * 10,
+        type='LinearLR',
+        start_factor=0.2,
         begin=0,
-        end=8,
+        end=10,
         by_epoch=True,
         convert_to_iter_based=True),
     dict(
         type='CosineAnnealingLR',
-        T_max=12,
-        eta_min=lr * 1e-2,
-        begin=8,
-        end=20,
+        T_max=14,
+        eta_min_ratio=1e-4,
+        begin=10,
+        end=24,
         by_epoch=True,
         convert_to_iter_based=True),
-    # momentum scheduler
-    # During the first 8 epochs, momentum increases from 0 to 0.85 / 0.95
-    # during the next 12 epochs, momentum increases from 0.85 / 0.95 to 1
     dict(
         type='CosineAnnealingMomentum',
-        T_max=8,
         eta_min=0.85 / 0.95,
         begin=0,
-        end=8,
+        end=10,
         by_epoch=True,
         convert_to_iter_based=True),
     dict(
         type='CosineAnnealingMomentum',
-        T_max=12,
         eta_min=1,
-        begin=8,
-        end=20,
+        begin=10,
+        end=24,
         by_epoch=True,
         convert_to_iter_based=True)
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=6)
+train_cfg = dict(by_epoch=True, max_epochs=24, val_interval=5)
 val_cfg = dict()
 test_cfg = dict()
 
@@ -406,4 +397,4 @@ log_processor = dict(window_size=50)
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
     checkpoint=dict(type='CheckpointHook', interval=1))
-custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=15)]
+custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=18)]

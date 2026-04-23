@@ -111,10 +111,14 @@ class KlDataset(Det3DDataset):
                  with_velocity: bool = True,
                  use_valid_flag: bool = False,
                  num_adj_frames: int = 0,
+                 load_prev_frame: bool = False,
+                 load_prev_frame_queue: int = 0,
                  **kwargs) -> None:
         self.use_valid_flag = use_valid_flag
         self.with_velocity = with_velocity
         self.num_adj_frames = num_adj_frames
+        self.load_prev_frame = load_prev_frame
+        self.load_prev_frame_queue = load_prev_frame_queue
         self._token_to_raw: dict = {}
 
         # TODO: Redesign multi-view data process in the future
@@ -148,7 +152,8 @@ class KlDataset(Det3DDataset):
             f'invalid lidar_coord_frame in pkl metainfo: '
             f'{self.lidar_coord_frame!r}')
 
-        if self.num_adj_frames > 0:
+        if (self.num_adj_frames > 0 or self.load_prev_frame
+                or self.load_prev_frame_queue > 0):
             # Build token → minimal-info index from the same raw pkl.
             # This must happen BEFORE super().full_init() so that
             # parse_data_info() can use _token_to_raw.
@@ -193,6 +198,45 @@ class KlDataset(Det3DDataset):
                 adj_infos.append(None)
                 cur = info  # reset so remaining slots also get None
         return adj_infos
+
+    def _get_prev_info(self, info: dict) -> Optional[dict]:
+        """Fetch the immediate previous frame info if available."""
+        prev_token = info.get('prev', '')
+        if not prev_token or prev_token not in self._token_to_raw:
+            return None
+
+        prev = self._token_to_raw[prev_token]
+        if not prev.get('lidar_path', ''):
+            return None
+
+        return dict(
+            lidar_path=prev['lidar_path'],
+            ego2global=prev['ego2global'],
+            timestamp=prev['timestamp'],
+            images=prev['images'])
+
+    def _get_prev_infos(self, info: dict, num_prev_frames: int) -> List[dict]:
+        """Fetch an oldest-to-newest queue of previous frame infos.
+
+        Missing history slots are filled with ``None`` so the returned list
+        always has length ``num_prev_frames``.
+        """
+        prev_infos = []
+        cur = info
+        for _ in range(num_prev_frames):
+            prev_token = cur.get('prev', '')
+            if prev_token and prev_token in self._token_to_raw:
+                cur = self._token_to_raw[prev_token]
+                prev_infos.append(dict(
+                    lidar_path=cur['lidar_path'],
+                    ego2global=cur['ego2global'],
+                    timestamp=cur['timestamp'],
+                    images=cur['images']))
+            else:
+                prev_infos.append(None)
+                cur = info
+        prev_infos.reverse()
+        return prev_infos
 
     def _filter_with_mask(self, ann_info: dict) -> dict:
         """Remove annotations that do not need to be cared.
@@ -335,5 +379,10 @@ class KlDataset(Det3DDataset):
             data_info = super().parse_data_info(info)
             if self.num_adj_frames > 0:
                 data_info['adj_infos'] = self._get_adj_infos(info)
+            if self.load_prev_frame:
+                data_info['prev_info'] = self._get_prev_info(info)
+            if self.load_prev_frame_queue > 0:
+                data_info['prev_infos'] = self._get_prev_infos(
+                    info, self.load_prev_frame_queue)
             data_info['lidar_coord_frame'] = self.lidar_coord_frame
             return data_info
