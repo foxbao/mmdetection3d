@@ -110,13 +110,11 @@ class KlDataset(Det3DDataset):
                  test_mode: bool = False,
                  with_velocity: bool = True,
                  use_valid_flag: bool = False,
-                 num_adj_frames: int = 0,
                  load_prev_frame: bool = False,
                  load_prev_frame_queue: int = 0,
                  **kwargs) -> None:
         self.use_valid_flag = use_valid_flag
         self.with_velocity = with_velocity
-        self.num_adj_frames = num_adj_frames
         self.load_prev_frame = load_prev_frame
         self.load_prev_frame_queue = load_prev_frame_queue
         self._token_to_raw: dict = {}
@@ -138,7 +136,7 @@ class KlDataset(Det3DDataset):
             **kwargs)
 
     def full_init(self) -> None:
-        """Override to pre-build token index for adj-frame lookup."""
+        """Override to pre-build token index for previous-frame lookup."""
         if self._fully_initialized:
             return
 
@@ -152,8 +150,7 @@ class KlDataset(Det3DDataset):
             f'invalid lidar_coord_frame in pkl metainfo: '
             f'{self.lidar_coord_frame!r}')
 
-        if (self.num_adj_frames > 0 or self.load_prev_frame
-                or self.load_prev_frame_queue > 0):
+        if self.load_prev_frame or self.load_prev_frame_queue > 0:
             # Build token → minimal-info index from the same raw pkl.
             # This must happen BEFORE super().full_init() so that
             # parse_data_info() can use _token_to_raw.
@@ -174,30 +171,6 @@ class KlDataset(Det3DDataset):
                 }
 
         super().full_init()
-
-    def _get_adj_infos(self, info: dict) -> List[Optional[dict]]:
-        """Follow the prev chain to collect N historical frame infos.
-
-        Returns a list of length num_adj_frames.  Each entry is either a dict
-        with {lidar_path, ego2global, timestamp, images} or None if the chain
-        ran out (scene boundary).
-        """
-        adj_infos = []
-        cur = info
-        for _ in range(self.num_adj_frames):
-            prev_token = cur.get('prev', '')
-            if prev_token and prev_token in self._token_to_raw:
-                cur = self._token_to_raw[prev_token]
-                adj_infos.append({
-                    'lidar_path': cur['lidar_path'],
-                    'ego2global': cur['ego2global'],
-                    'timestamp': cur['timestamp'],
-                    'images': cur['images'],
-                })
-            else:
-                adj_infos.append(None)
-                cur = info  # reset so remaining slots also get None
-        return adj_infos
 
     def _get_prev_info(self, info: dict) -> Optional[dict]:
         """Fetch the immediate previous frame info if available."""
@@ -377,8 +350,6 @@ class KlDataset(Det3DDataset):
             return data_list
         else:
             data_info = super().parse_data_info(info)
-            if self.num_adj_frames > 0:
-                data_info['adj_infos'] = self._get_adj_infos(info)
             if self.load_prev_frame:
                 data_info['prev_info'] = self._get_prev_info(info)
             if self.load_prev_frame_queue > 0:

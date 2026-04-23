@@ -962,19 +962,6 @@ class PointsRangeFilter(BaseTransform):
         if pts_semantic_mask is not None:
             input_dict['pts_semantic_mask'] = pts_semantic_mask[points_mask]
 
-        if 'adj_points' in input_dict:
-            pc_min = torch.as_tensor(self.pcd_range[:3])
-            pc_max = torch.as_tensor(self.pcd_range[3:])
-            filtered = []
-            for adj_pts in input_dict['adj_points']:
-                if adj_pts is None:
-                    filtered.append(None)
-                    continue
-                xyz = adj_pts[:, :3]
-                mask = ((xyz >= pc_min) & (xyz <= pc_max)).all(dim=1)
-                filtered.append(adj_pts[mask])
-            input_dict['adj_points'] = filtered
-
         if input_dict.get('prev_points', None) is not None:
             prev_mask = input_dict['prev_points'].in_range_3d(self.pcd_range)
             input_dict['prev_points'] = input_dict['prev_points'][prev_mask]

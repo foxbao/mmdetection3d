@@ -47,8 +47,7 @@ def to_tensor(
 
 @TRANSFORMS.register_module()
 class Pack3DDetInputs(BaseTransform):
-    INPUTS_KEYS = ['points', 'img', 'adj_points', 'adj_ego_motions',
-                   'prev_points', 'prev_points_queue']
+    INPUTS_KEYS = ['points', 'img', 'prev_points', 'prev_points_queue']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d',
         'gt_forecasting_locs', 'gt_forecasting_mask',
