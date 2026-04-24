@@ -114,10 +114,30 @@ def kl_data_prep(root_path,
     update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_train_path)
     update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_val_path)
 
-    # Add GT forecasting trajectories (requires prev/next + scene_token in v2).
-    from tools.dataset_converters.add_forecasting import add_forecasting_to_pkl
-    add_forecasting_to_pkl(info_train_path, forecast_steps=6)
-    add_forecasting_to_pkl(info_val_path, forecast_steps=6)
+    temporal_chain_cfg = {}
+    if cfg is not None and hasattr(cfg, 'temporal_chain_cfg'):
+        temporal_chain_cfg = dict(cfg.temporal_chain_cfg)
+    temporal_chain_enabled = bool(temporal_chain_cfg.get('enable', True))
+
+    forecast_cfg = {}
+    if cfg is not None and hasattr(cfg, 'forecast_cfg'):
+        forecast_cfg = dict(cfg.forecast_cfg)
+    forecast_enabled = bool(forecast_cfg.get('enable', True))
+    forecast_steps = int(forecast_cfg.get('forecast_steps', 6))
+
+    # Add GT forecasting trajectories only when both forecasting and
+    # temporal links are enabled.
+    if temporal_chain_enabled and forecast_enabled:
+        from tools.dataset_converters.add_forecasting import \
+            add_forecasting_to_pkl
+        add_forecasting_to_pkl(info_train_path, forecast_steps=forecast_steps)
+        add_forecasting_to_pkl(info_val_path, forecast_steps=forecast_steps)
+    elif not temporal_chain_enabled:
+        print('[KL] temporal_chain_cfg.enable=False, skip forecasting '
+              'trajectory generation because prev/next links are disabled')
+    else:
+        print('[KL] forecast_cfg.enable=False, skip forecasting trajectory '
+              'generation')
 
     # Add nuScenes-style object velocities from track_id trajectories.  Keep the
     # original pkl names untouched and write explicit velocity variants so

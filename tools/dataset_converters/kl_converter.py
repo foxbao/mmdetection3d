@@ -876,19 +876,38 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
     if cfg is not None and hasattr(cfg, 'img_scale'):
         img_scale = cfg.img_scale
 
-    sync_cfg = {}
+    legacy_sync_cfg = {}
     if cfg is not None and hasattr(cfg, 'sync_cfg'):
-        sync_cfg = dict(cfg.sync_cfg)
-    sensor_time_offsets = sync_cfg.get(
-        'sensor_time_offsets', sync_cfg.get('sensor_offsets', {}))
-    lidar_max_diff = float(sync_cfg.get('lidar_max_diff', max_diff))
-    camera_max_diff = float(sync_cfg.get('camera_max_diff', max_diff))
+        legacy_sync_cfg = dict(cfg.sync_cfg)
+    sensor_sync_cfg = dict(legacy_sync_cfg)
+    if cfg is not None and hasattr(cfg, 'sensor_sync_cfg'):
+        sensor_sync_cfg.update(dict(cfg.sensor_sync_cfg))
+    temporal_chain_cfg = {}
+    if cfg is not None and hasattr(cfg, 'temporal_chain_cfg'):
+        temporal_chain_cfg = dict(cfg.temporal_chain_cfg)
+
+    sensor_time_offsets = sensor_sync_cfg.get(
+        'sensor_time_offsets', sensor_sync_cfg.get('sensor_offsets', {}))
+    lidar_max_diff = float(sensor_sync_cfg.get('lidar_max_diff', max_diff))
+    camera_max_diff = float(sensor_sync_cfg.get('camera_max_diff', max_diff))
     localization_max_diff = float(
-        sync_cfg.get('localization_max_diff', 0.15))
+        sensor_sync_cfg.get('localization_max_diff', 0.15))
     require_valid_localization = bool(
-        sync_cfg.get('require_valid_localization', False))
-    min_adj_time_diff = float(sync_cfg.get('min_adj_time_diff', 0.0))
-    max_adj_time_diff = float(sync_cfg.get('max_adj_time_diff', float('inf')))
+        sensor_sync_cfg.get('require_valid_localization', False))
+
+    temporal_chain_enabled = bool(temporal_chain_cfg.get('enable', True))
+    if temporal_chain_enabled:
+        min_adj_time_diff = float(
+            temporal_chain_cfg.get(
+                'min_adj_time_diff',
+                legacy_sync_cfg.get('min_adj_time_diff', 0.0)))
+        max_adj_time_diff = float(
+            temporal_chain_cfg.get(
+                'max_adj_time_diff',
+                legacy_sync_cfg.get('max_adj_time_diff', float('inf'))))
+    else:
+        min_adj_time_diff = None
+        max_adj_time_diff = None
 
     frame_info_list = []
     # lidar_dirs = [p.parent for p in sample_path.rglob("lidar") if p.is_dir()]
@@ -1085,6 +1104,7 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
                 'camera_max_diff': camera_max_diff,
                 'localization_max_diff': localization_max_diff,
                 'require_valid_localization': require_valid_localization,
+                'temporal_chain_enabled': temporal_chain_enabled,
                 'min_adj_time_diff': min_adj_time_diff,
                 'max_adj_time_diff': max_adj_time_diff,
                 'sensor_time_offsets': sensor_time_offsets,
@@ -1129,21 +1149,25 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
         scene_groups[info['scene_token']].append(idx)
     n_with_prev = 0
     n_broken_time = 0
-    for scene_tok, indices in scene_groups.items():
-        indices.sort(key=lambda i: all_infos[i]['timestamp'])
-        for prev_idx, cur_idx in zip(indices, indices[1:]):
-            dt = all_infos[cur_idx]['timestamp'] - all_infos[prev_idx][
-                'timestamp']
-            if min_adj_time_diff <= dt <= max_adj_time_diff:
-                all_infos[cur_idx]['prev'] = all_infos[prev_idx]['token']
-                all_infos[prev_idx]['next'] = all_infos[cur_idx]['token']
-                n_with_prev += 1
-            else:
-                n_broken_time += 1
-    print(f"[Stage 3] prev/next built: {len(scene_groups)} scenes, "
-          f"{n_with_prev}/{len(all_infos)} frames have prev, "
-          f"{n_broken_time} links broken by time gap "
-          f"[{min_adj_time_diff}, {max_adj_time_diff}]s")
+    if temporal_chain_enabled:
+        for scene_tok, indices in scene_groups.items():
+            indices.sort(key=lambda i: all_infos[i]['timestamp'])
+            for prev_idx, cur_idx in zip(indices, indices[1:]):
+                dt = all_infos[cur_idx]['timestamp'] - all_infos[prev_idx][
+                    'timestamp']
+                if min_adj_time_diff <= dt <= max_adj_time_diff:
+                    all_infos[cur_idx]['prev'] = all_infos[prev_idx]['token']
+                    all_infos[prev_idx]['next'] = all_infos[cur_idx]['token']
+                    n_with_prev += 1
+                else:
+                    n_broken_time += 1
+        print(f"[Stage 3] prev/next built: {len(scene_groups)} scenes, "
+              f"{n_with_prev}/{len(all_infos)} frames have prev, "
+              f"{n_broken_time} links broken by time gap "
+              f"[{min_adj_time_diff}, {max_adj_time_diff}]s")
+    else:
+        print(f'[Stage 3] prev/next disabled: {len(scene_groups)} scenes, '
+              'all frames keep empty temporal links')
     # ===== END =====
     # gt_info = process_gt_annotations(frame_info, frame_id,lidar_path=info['lidar_path'])
     # if gt_info is None:
