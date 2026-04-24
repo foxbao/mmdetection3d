@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import unittest
 
+import numpy as np
 import torch
 from mmengine.testing import assert_allclose
 
