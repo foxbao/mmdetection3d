@@ -1,0 +1,31 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Debug BEVFusion KL dataset (single GPU)",
+        "type": "debugpy",
+        "request": "launch",
+  
+        "program": "${workspaceFolder}/tools/train.py",
+  
+        "args": [
+          "projects/BEVFusion/configs/bevfusion_lidar_camera_yx_kl_lss.py",
+          "--launcher",
+          "none",
+          "--cfg-options",
+          // "load_from=work_dirs/bevfusion_yx_kl/epoch_20.pth",
+          "model.img_backbone.init_cfg.checkpoint=pretrained/swint-nuimages-pretrained.pth"
+        ],
+  
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "CUDA_VISIBLE_DEVICES": "0"
+        },
+  
+        "console": "integratedTerminal",
+        "justMyCode": false,
+        "subProcess": false
+      }
+    ]
+  }
+  
