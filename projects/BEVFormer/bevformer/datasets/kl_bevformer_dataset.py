@@ -22,6 +22,14 @@ current frame, then merged into a single sample that carries:
 Boundary policy (Stage 2): strict temporal segments. The queue must be fully
 recoverable from ``prev`` links inside one scene; otherwise the sample is
 rejected before reaching the model.
+
+Augmentation policy: ``GlobalRotScaleTrans`` and ``RandomFlip3D`` samples
+the same ``pcd_rotation_angle`` / ``pcd_scale_factor`` / ``pcd_trans`` /
+``pcd_{horizontal,vertical}_flip`` values ONCE per queue and injects them
+into every per-frame pipeline call. Without this, each historical frame
+gets a different random rotation/flip, which silently invalidates the
+``ego_motion_delta`` that lives in the original (pre-aug) coordinate frame
+and breaks the warping of ``prev_bev`` into the current ego frame.
 """
 from __future__ import annotations
 
@@ -67,6 +75,8 @@ class KlBEVFormerDataset(KlDataset):
         if indices is None:
             return None
 
+        shared_aug = {} if self.test_mode else self._sample_shared_aug()
+
         queue: List[dict] = []
         raw_meta: List[dict] = []
         for i in indices:
@@ -74,11 +84,43 @@ class KlBEVFormerDataset(KlDataset):
             if raw is None:
                 return None
             raw_meta.append(self._extract_raw_meta(raw))
-            example = self._single_prepare(raw)
+            example = self._single_prepare(raw, shared_aug)
             if example is None:
                 return None
             queue.append(example)
         return self._union2one(queue, raw_meta)
+
+    def _sample_shared_aug(self) -> dict:
+        """Pre-sample aug params that must stay identical across the queue.
+
+        Walks ``self.pipeline.transforms`` for ``GlobalRotScaleTrans`` /
+        ``RandomFlip3D`` instances and re-samples exactly the distributions
+        those transforms would have sampled internally. The resulting dict
+        is merged into every per-frame ``input_dict`` so the transforms
+        reuse the pre-set values instead of drawing fresh ones per frame.
+
+        Returns an empty dict if neither transform is in the pipeline, so
+        single-frame configs of ``KlBEVFormerDataset`` remain unaffected.
+        """
+        shared: dict = {}
+        for t in getattr(self.pipeline, 'transforms', []):
+            cls_name = type(t).__name__
+            if cls_name == 'GlobalRotScaleTrans':
+                rot_lo, rot_hi = t.rot_range
+                shared['pcd_rotation_angle'] = float(
+                    np.random.uniform(rot_lo, rot_hi))
+                scale_lo, scale_hi = t.scale_ratio_range
+                shared['pcd_scale_factor'] = float(
+                    np.random.uniform(scale_lo, scale_hi))
+                translation_std = np.array(t.translation_std, dtype=np.float32)
+                shared['pcd_trans'] = np.random.normal(
+                    scale=translation_std, size=3).T.astype(np.float32)
+            elif cls_name == 'RandomFlip3D':
+                shared['pcd_horizontal_flip'] = bool(
+                    np.random.rand() < (t.flip_ratio_bev_horizontal or 0.0))
+                shared['pcd_vertical_flip'] = bool(
+                    np.random.rand() < (t.flip_ratio_bev_vertical or 0.0))
+        return shared
 
     def _collect_queue_indices(self, index: int) -> Optional[List[int]]:
         """Collect a full queue by following explicit ``prev`` links."""
@@ -124,11 +166,16 @@ class KlBEVFormerDataset(KlDataset):
             'token': raw.get('token'),
         }
 
-    def _single_prepare(self, ori_input_dict: dict) -> Optional[dict]:
+    def _single_prepare(self,
+                        ori_input_dict: dict,
+                        shared_aug: Optional[dict] = None) -> Optional[dict]:
         """Per-frame pipeline run, mirroring ``Det3DDataset.prepare_data``."""
         input_dict = copy.deepcopy(ori_input_dict)
         input_dict['box_type_3d'] = self.box_type_3d
         input_dict['box_mode_3d'] = self.box_mode_3d
+        if shared_aug:
+            # deepcopy so each frame can mutate its own copy in-place.
+            input_dict.update(copy.deepcopy(shared_aug))
 
         if not self.test_mode and self.filter_empty_gt:
             if len(input_dict['ann_info']['gt_labels_3d']) == 0:

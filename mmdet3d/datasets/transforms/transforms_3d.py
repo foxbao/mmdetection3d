@@ -711,8 +711,12 @@ class GlobalRotScaleTrans(BaseTransform):
             dict: Results after translation, 'points', 'pcd_trans'
             and `gt_bboxes_3d` is updated in the result dict.
         """
-        translation_std = np.array(self.translation_std, dtype=np.float32)
-        trans_factor = np.random.normal(scale=translation_std, size=3).T
+        if 'pcd_trans' in input_dict:
+            trans_factor = np.asarray(
+                input_dict['pcd_trans'], dtype=np.float32)
+        else:
+            translation_std = np.array(self.translation_std, dtype=np.float32)
+            trans_factor = np.random.normal(scale=translation_std, size=3).T
 
         input_dict['points'].translate(trans_factor)
         input_dict['pcd_trans'] = trans_factor
@@ -729,8 +733,11 @@ class GlobalRotScaleTrans(BaseTransform):
             dict: Results after rotation, 'points', 'pcd_rotation'
             and `gt_bboxes_3d` is updated in the result dict.
         """
-        rotation = self.rot_range
-        noise_rotation = np.random.uniform(rotation[0], rotation[1])
+        if 'pcd_rotation_angle' in input_dict:
+            noise_rotation = float(input_dict['pcd_rotation_angle'])
+        else:
+            rotation = self.rot_range
+            noise_rotation = np.random.uniform(rotation[0], rotation[1])
 
         if 'gt_bboxes_3d' in input_dict and \
                 len(input_dict['gt_bboxes_3d'].tensor) != 0:
