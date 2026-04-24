@@ -31,7 +31,6 @@ class BEVFusion(Base3DDetector):
         view_transform: Optional[dict] = None,
         img_neck: Optional[dict] = None,
         pts_neck: Optional[dict] = None,
-        temporal_fuser: Optional[dict] = None,
         bbox_head: Optional[dict] = None,
         init_cfg: OptMultiConfig = None,
         seg_head: Optional[dict] = None,
@@ -68,8 +67,6 @@ class BEVFusion(Base3DDetector):
         self.pts_neck = MODELS.build(
             pts_neck) if pts_neck is not None else None
 
-        self.temporal_fuser = MODELS.build(
-            temporal_fuser) if temporal_fuser is not None else None
         self.bbox_head = MODELS.build(bbox_head)
 
         self.init_weights()
@@ -212,12 +209,11 @@ class BEVFusion(Base3DDetector):
 
         return self.add_pred_to_datasample(batch_data_samples, outputs)
 
-    def _extract_single_frame_bev(
+    def extract_feat(
         self,
         batch_inputs_dict,
         batch_input_metas,
     ):
-        """Extract one-frame BEV features without temporal fusion."""
         imgs = batch_inputs_dict.get('imgs', None)
         points = batch_inputs_dict.get('points', None)
         features = []
@@ -260,234 +256,6 @@ class BEVFusion(Base3DDetector):
             x = self.pts_neck(x)
 
         return x
-
-    def _extract_prev_bev_from_inputs(self, batch_inputs_dict,
-                                      batch_input_metas, current_bev):
-        """Build a padded batch of prev_bev from per-sample prev_points."""
-        prev_points = batch_inputs_dict.get('prev_points', None)
-        batch_size = len(batch_input_metas)
-        if prev_points is None:
-            prev_bevs = current_bev.new_zeros(current_bev.shape)
-            cold_mask = torch.ones(
-                batch_size, dtype=torch.bool, device=current_bev.device)
-            prev_ego2globals = [None] * batch_size
-            prev_lidar_aug = [
-                np.eye(4, dtype=np.float32) for _ in range(batch_size)
-            ]
-            prev_exists = torch.zeros(
-                batch_size, dtype=torch.bool, device=current_bev.device)
-            return (prev_bevs, cold_mask, prev_ego2globals, prev_lidar_aug,
-                    prev_exists)
-
-        if self.img_backbone is not None or batch_inputs_dict.get(
-                'imgs', None) is not None:
-            raise NotImplementedError(
-                'prev_points-based prev_bev currently supports LiDAR-only '
-                'BEVFusion.')
-
-        valid_indices = []
-        prev_ego2globals = []
-        prev_lidar_aug = []
-        for idx in range(batch_size):
-            prev_pts = prev_points[idx]
-            prev_e2g = batch_input_metas[idx].get('prev_ego2global', None)
-            if prev_pts is None or prev_e2g is None:
-                prev_ego2globals.append(None)
-                prev_lidar_aug.append(np.eye(4, dtype=np.float32))
-                continue
-            valid_indices.append(idx)
-            prev_ego2globals.append(prev_e2g)
-            prev_lidar_aug.append(
-                batch_input_metas[idx].get('lidar_aug_matrix', np.eye(4)))
-
-        prev_bevs = current_bev.new_zeros(current_bev.shape)
-        cold_mask = torch.ones(
-            batch_size, dtype=torch.bool, device=current_bev.device)
-        prev_exists = torch.zeros(
-            batch_size, dtype=torch.bool, device=current_bev.device)
-        if len(valid_indices) == 0:
-            return (prev_bevs, cold_mask, prev_ego2globals, prev_lidar_aug,
-                    prev_exists)
-
-        prev_batch = {'points': [prev_points[idx] for idx in valid_indices]}
-        prev_metas = []
-        for idx in valid_indices:
-            prev_meta = dict(batch_input_metas[idx])
-            prev_meta['ego2global'] = batch_input_metas[idx]['prev_ego2global']
-            prev_metas.append(prev_meta)
-
-        with torch.no_grad():
-            prev_bev = self._extract_single_frame_bev(prev_batch, prev_metas)
-
-        if isinstance(prev_bev, (list, tuple)):
-            prev_bev = prev_bev[0]
-
-        prev_bevs[valid_indices] = prev_bev.detach()
-        cold_mask[valid_indices] = False
-        prev_exists[valid_indices] = True
-        if any('prev_bev_exists' in meta for meta in batch_input_metas):
-            meta_prev_exists = torch.tensor(
-                [bool(meta.get('prev_bev_exists', False))
-                 for meta in batch_input_metas],
-                device=current_bev.device,
-                dtype=torch.bool)
-            prev_exists = prev_exists & meta_prev_exists
-            cold_mask = cold_mask | (~prev_exists)
-        return (prev_bevs, cold_mask, prev_ego2globals, prev_lidar_aug,
-                prev_exists)
-
-    def _extract_history_bev_from_queue_inputs(self, batch_inputs_dict,
-                                               batch_input_metas, current_bev):
-        """Recursively roll a short prev-points queue into one history BEV."""
-        raw_queue = batch_inputs_dict.get('prev_points_queue', None)
-        if raw_queue is None:
-            return None
-
-        if self.img_backbone is not None or batch_inputs_dict.get(
-                'imgs', None) is not None:
-            raise NotImplementedError(
-                'prev_points_queue-based history BEV currently supports '
-                'LiDAR-only BEVFusion.')
-
-        num_prev = len(raw_queue)
-        batch_size = len(batch_input_metas)
-        if num_prev == 0 or batch_size == 0:
-            return None
-
-        device = current_bev.device
-        lidar_aug_matrices = [
-            meta.get('lidar_aug_matrix', np.eye(4))
-            for meta in batch_input_metas
-        ]
-        lidar_coord_frame = (
-            batch_input_metas[0].get('lidar_coord_frame', 'FLU')
-            if batch_input_metas else 'FLU')
-
-        history_bev = None
-        history_ego2global = [None] * batch_size
-        history_exists = torch.zeros(
-            batch_size, dtype=torch.bool, device=device)
-
-        for frame_idx in range(num_prev):
-            frame_points = raw_queue[frame_idx]
-            frame_ego2global = []
-            frame_exists = []
-            valid_indices = []
-            for sample_idx in range(batch_size):
-                meta = batch_input_metas[sample_idx]
-                ego2global_queue = meta.get('prev_ego2global_queue', [])
-                exists_queue = meta.get('prev_bev_exists_queue', [])
-                frame_e2g = (ego2global_queue[frame_idx]
-                             if frame_idx < len(ego2global_queue) else None)
-                frame_exist = bool(exists_queue[frame_idx]) if (
-                    frame_idx < len(exists_queue)) else False
-                frame_pts = frame_points[sample_idx]
-                if frame_pts is None or frame_e2g is None or not frame_exist:
-                    frame_ego2global.append(None)
-                    frame_exists.append(False)
-                    continue
-                frame_ego2global.append(frame_e2g)
-                frame_exists.append(True)
-                valid_indices.append(sample_idx)
-
-            frame_bev = current_bev.new_zeros(current_bev.shape)
-            frame_exists_tensor = torch.tensor(
-                frame_exists, dtype=torch.bool, device=device)
-            if valid_indices:
-                frame_batch = dict(
-                    points=[
-                        frame_points[idx].to(device).contiguous()
-                        for idx in valid_indices
-                    ])
-                frame_metas = []
-                for idx in valid_indices:
-                    frame_meta = dict(batch_input_metas[idx])
-                    frame_meta['ego2global'] = frame_ego2global[idx]
-                    frame_metas.append(frame_meta)
-                with torch.no_grad():
-                    valid_bev = self._extract_single_frame_bev(
-                        frame_batch, frame_metas)
-                if isinstance(valid_bev, (list, tuple)):
-                    valid_bev = valid_bev[0]
-                frame_bev[valid_indices] = valid_bev.detach()
-
-            if history_bev is None:
-                history_bev = frame_bev
-                history_ego2global = frame_ego2global
-                history_exists = frame_exists_tensor
-                continue
-
-            history_bev = self.temporal_fuser(
-                curr_bev=frame_bev,
-                prev_bev=history_bev,
-                curr_ego2global=frame_ego2global,
-                prev_ego2global=history_ego2global,
-                curr_lidar_aug_matrix=lidar_aug_matrices,
-                prev_lidar_aug_matrix=lidar_aug_matrices,
-                cold_mask=~history_exists,
-                prev_bev_exists=history_exists,
-                lidar_coord_frame=lidar_coord_frame)
-            history_ego2global = frame_ego2global
-            history_exists = frame_exists_tensor
-
-        if history_bev is None:
-            return None
-
-        cold_mask = ~history_exists
-        prev_aug = [np.eye(4, dtype=np.float32) for _ in range(batch_size)]
-        for idx in range(batch_size):
-            if history_exists[idx]:
-                prev_aug[idx] = np.asarray(
-                    lidar_aug_matrices[idx], dtype=np.float32)
-        return (history_bev, cold_mask, history_ego2global, prev_aug,
-                history_exists)
-
-    def extract_feat(
-        self,
-        batch_inputs_dict,
-        batch_input_metas,
-    ):
-        x = self._extract_single_frame_bev(
-            batch_inputs_dict, batch_input_metas)
-
-        if self.temporal_fuser is None:
-            return x
-
-        fuser_mode = getattr(self.temporal_fuser, 'fuser_mode', None)
-        if fuser_mode != 'prev_bev':
-            raise ValueError(f'Unsupported temporal_fuser mode: {fuser_mode!r}')
-
-        was_list = isinstance(x, (list, tuple))
-        x_tensor = x[0] if was_list else x
-        ego2globals = [
-            meta.get('ego2global', np.eye(4))
-            for meta in batch_input_metas
-        ]
-        lidar_aug_matrices = [
-            meta.get('lidar_aug_matrix', np.eye(4))
-            for meta in batch_input_metas
-        ]
-        lidar_coord_frame = (
-            batch_input_metas[0].get('lidar_coord_frame', 'FLU')
-            if batch_input_metas else 'FLU')
-
-        prev_state = self._extract_history_bev_from_queue_inputs(
-            batch_inputs_dict, batch_input_metas, x_tensor)
-        if prev_state is None:
-            prev_state = self._extract_prev_bev_from_inputs(
-                batch_inputs_dict, batch_input_metas, x_tensor)
-        prev_bevs, cold_mask, prev_e2g, prev_aug, prev_exists = prev_state
-        x_tensor = self.temporal_fuser(
-            curr_bev=x_tensor,
-            prev_bev=prev_bevs,
-            curr_ego2global=ego2globals,
-            prev_ego2global=prev_e2g,
-            curr_lidar_aug_matrix=lidar_aug_matrices,
-            prev_lidar_aug_matrix=prev_aug,
-            cold_mask=cold_mask,
-            prev_bev_exists=prev_exists,
-            lidar_coord_frame=lidar_coord_frame)
-        return [x_tensor] if was_list else x_tensor
 
     def loss(self, batch_inputs_dict: Dict[str, Optional[Tensor]],
              batch_data_samples: List[Det3DDataSample],

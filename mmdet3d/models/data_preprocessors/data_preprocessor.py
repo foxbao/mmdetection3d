@@ -206,10 +206,6 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
             batch_inputs['imgs'] = imgs
 
         # Pass through temporal point-cloud data if present.
-        for temporal_key in ('prev_points', 'prev_points_queue'):
-            if temporal_key in inputs:
-                batch_inputs[temporal_key] = inputs[temporal_key]
-
         return {'inputs': batch_inputs, 'data_samples': data_samples}
 
     def preprocess_img(self, _batch_img: Tensor) -> Tensor:

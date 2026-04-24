@@ -34,25 +34,3 @@ class TestPack3DDetInputs(unittest.TestCase):
         self.assertIsInstance(gt_instances.bboxes_3d, LiDARInstance3DBoxes)
         assert_allclose(gt_instances.bboxes_3d.tensor.sum(),
                         torch.tensor(7.2650))
-
-    def test_pack_prev_points(self):
-        ori_data_info = create_data_info_after_loading()
-        ori_data_info['prev_points'] = ori_data_info['points'].clone()
-        pack_input = Pack3DDetInputs(keys=['points', 'prev_points'])
-        packed_results = pack_input(ori_data_info)
-        inputs = packed_results['inputs']
-        self.assertIn('prev_points', inputs)
-        self.assertIsInstance(inputs['prev_points'], torch.Tensor)
-        assert_allclose(inputs['prev_points'].sum(), inputs['points'].sum())
-
-    def test_pack_prev_points_queue(self):
-        ori_data_info = create_data_info_after_loading()
-        ori_data_info['prev_points_queue'] = [
-            ori_data_info['points'].clone(), None
-        ]
-        pack_input = Pack3DDetInputs(keys=['points', 'prev_points_queue'])
-        packed_results = pack_input(ori_data_info)
-        inputs = packed_results['inputs']
-        self.assertIn('prev_points_queue', inputs)
-        self.assertIsInstance(inputs['prev_points_queue'][0], torch.Tensor)
-        self.assertIsNone(inputs['prev_points_queue'][1])

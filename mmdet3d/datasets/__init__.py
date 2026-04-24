@@ -24,13 +24,11 @@ from .transforms import (AffineResize, BackgroundPointsFilter, GlobalAlignment,
                          PointsRangeFilter, RandomDropPointsColor,
                          RandomFlip3D, RandomJitterPoints, RandomResize3D,
                          RandomShiftScale, Resize3D, VoxelBasedPointSampler)
-from .samplers import SceneGroupedSampler
 from .utils import get_loading_pipeline
 from .waymo_dataset import WaymoDataset
 
 __all__ = [
     'KittiDataset', 'CBGSDataset', 'NuScenesDataset', 'KlDataset', 'LyftDataset',
-    'SceneGroupedSampler',
     'ObjectSample', 'RandomFlip3D', 'ObjectNoise', 'GlobalRotScaleTrans',
     'PointShuffle', 'ObjectRangeFilter', 'PointsRangeFilter',
     'LoadPointsFromFile', 'S3DISSegDataset', 'S3DISDataset',

@@ -122,12 +122,6 @@ class BEVFusionRandomFlip3D:
             rotation = np.array([[1, 0, 0], [0, -1, 0], [0, 0, 1]]) @ rotation
             if 'points' in data:
                 data['points'].flip('horizontal')
-            if data.get('prev_points', None) is not None:
-                data['prev_points'].flip('horizontal')
-            if 'prev_points_queue' in data:
-                for prev_points in data['prev_points_queue']:
-                    if prev_points is not None:
-                        prev_points.flip('horizontal')
             if 'gt_bboxes_3d' in data:
                 data['gt_bboxes_3d'].flip('horizontal')
             if 'gt_forecasting_locs' in data:
@@ -139,12 +133,6 @@ class BEVFusionRandomFlip3D:
             rotation = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, 1]]) @ rotation
             if 'points' in data:
                 data['points'].flip('vertical')
-            if data.get('prev_points', None) is not None:
-                data['prev_points'].flip('vertical')
-            if 'prev_points_queue' in data:
-                for prev_points in data['prev_points_queue']:
-                    if prev_points is not None:
-                        prev_points.flip('vertical')
             if 'gt_bboxes_3d' in data:
                 data['gt_bboxes_3d'].flip('vertical')
             if 'gt_forecasting_locs' in data:
@@ -188,12 +176,6 @@ class BEVFusionGlobalRotScaleTrans(GlobalRotScaleTrans):
 
         input_dict['pcd_rotation'] = rot_mat_T
         input_dict['pcd_rotation_angle'] = noise_rotation
-        if input_dict.get('prev_points', None) is not None:
-            input_dict['prev_points'].rotate(noise_rotation)
-        if 'prev_points_queue' in input_dict:
-            for prev_points in input_dict['prev_points_queue']:
-                if prev_points is not None:
-                    prev_points.rotate(noise_rotation)
         if 'gt_forecasting_locs' in input_dict:
             rot_mat = rot_mat_T[:2, :2]
             if isinstance(input_dict['gt_forecasting_locs'], np.ndarray):
@@ -207,12 +189,6 @@ class BEVFusionGlobalRotScaleTrans(GlobalRotScaleTrans):
 
         if 'points' in input_dict:
             input_dict['points'].translate(trans_factor)
-        if input_dict.get('prev_points', None) is not None:
-            input_dict['prev_points'].translate(trans_factor)
-        if 'prev_points_queue' in input_dict:
-            for prev_points in input_dict['prev_points_queue']:
-                if prev_points is not None:
-                    prev_points.translate(trans_factor)
         input_dict['pcd_trans'] = trans_factor
         if 'gt_bboxes_3d' in input_dict:
             input_dict['gt_bboxes_3d'].translate(trans_factor)
@@ -221,12 +197,6 @@ class BEVFusionGlobalRotScaleTrans(GlobalRotScaleTrans):
         scale = input_dict['pcd_scale_factor']
         if 'points' in input_dict:
             input_dict['points'].scale(scale)
-        if input_dict.get('prev_points', None) is not None:
-            input_dict['prev_points'].scale(scale)
-        if 'prev_points_queue' in input_dict:
-            for prev_points in input_dict['prev_points_queue']:
-                if prev_points is not None:
-                    prev_points.scale(scale)
         if 'gt_bboxes_3d' in input_dict and \
                 len(input_dict['gt_bboxes_3d'].tensor) != 0:
             input_dict['gt_bboxes_3d'].scale(scale)

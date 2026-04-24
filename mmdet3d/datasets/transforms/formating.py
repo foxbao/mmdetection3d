@@ -47,7 +47,7 @@ def to_tensor(
 
 @TRANSFORMS.register_module()
 class Pack3DDetInputs(BaseTransform):
-    INPUTS_KEYS = ['points', 'img', 'prev_points', 'prev_points_queue']
+    INPUTS_KEYS = ['points', 'img']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d',
         'gt_forecasting_locs', 'gt_forecasting_mask',
@@ -77,7 +77,7 @@ class Pack3DDetInputs(BaseTransform):
                             'cam2global', 'crop_offset', 'img_crop_offset',
                             'resize_img_shape', 'lidar2cam', 'ori_lidar2img',
                             'num_ref_frames', 'num_views', 'ego2global',
-                            'axis_align_matrix', 'lidar_coord_frame')
+                            'axis_align_matrix')
     ) -> None:
         self.keys = keys
         self.meta_keys = meta_keys
@@ -142,18 +142,8 @@ class Pack3DDetInputs(BaseTransform):
               of the sample.
         """
         # Format 3D data
-        for points_key in ('points', 'prev_points'):
-            if points_key in results and isinstance(results[points_key],
-                                                    BasePoints):
-                results[points_key] = results[points_key].tensor
-        if 'prev_points_queue' in results:
-            queue = []
-            for points in results['prev_points_queue']:
-                if isinstance(points, BasePoints):
-                    queue.append(points.tensor)
-                else:
-                    queue.append(points)
-            results['prev_points_queue'] = queue
+        if 'points' in results and isinstance(results['points'], BasePoints):
+            results['points'] = results['points'].tensor
 
         if 'img' in results:
             if isinstance(results['img'], list):
