@@ -112,7 +112,7 @@ model = dict(
             norm_cfg=dict(type='LN'),
             pos_encoding_cfg=dict(input_channel=2, num_pos_feats=128)),
         train_cfg=dict(
-            dataset='nuScenes',
+            dataset='KL',
             point_cloud_range=[-80.0, -48.0, -2.0, 80.0, 48.0, 6.0],
             grid_size=[1600, 960, 41],
             voxel_size=[0.1, 0.1, 0.2],
@@ -133,7 +133,7 @@ model = dict(
                 reg_cost=dict(type='BBoxBEVL1Cost', weight=0.25),
                 iou_cost=dict(type='IoU3DCost', weight=0.25))),
         test_cfg=dict(
-            dataset='nuScenes',
+            dataset='KL',
             grid_size=[1600, 960, 41],
             out_size_factor=8,
             voxel_size=[0.1, 0.1],
@@ -344,41 +344,52 @@ visualizer = dict(
 
 # learning rate
 lr = 0.0001
+# 6-epoch schedule
+max_epochs = 6
+warmup_epochs = 2
+val_interval = 6
+disable_object_sample_epoch = 4
+
+# 24-epoch schedule
+# max_epochs = 24
+# warmup_epochs = 10
+# val_interval = 5
+# disable_object_sample_epoch = 18
 param_scheduler = [
-    # 24-epoch schedule: 0-10 warmup, 10-24 cosine decay.
+    # Epoch-driven schedule: 0-warmup_epochs warmup, then cosine decay.
     dict(
         type='LinearLR',
         start_factor=0.2,
         begin=0,
-        end=10,
+        end=warmup_epochs,
         by_epoch=True,
         convert_to_iter_based=True),
     dict(
         type='CosineAnnealingLR',
-        T_max=14,
+        T_max=max_epochs - warmup_epochs,
         eta_min_ratio=1e-4,
-        begin=10,
-        end=24,
+        begin=warmup_epochs,
+        end=max_epochs,
         by_epoch=True,
         convert_to_iter_based=True),
     dict(
         type='CosineAnnealingMomentum',
         eta_min=0.85 / 0.95,
         begin=0,
-        end=10,
+        end=warmup_epochs,
         by_epoch=True,
         convert_to_iter_based=True),
     dict(
         type='CosineAnnealingMomentum',
         eta_min=1,
-        begin=10,
-        end=24,
+        begin=warmup_epochs,
+        end=max_epochs,
         by_epoch=True,
         convert_to_iter_based=True)
 ]
 
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=24, val_interval=5)
+train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=val_interval)
 val_cfg = dict()
 test_cfg = dict()
 
@@ -397,4 +408,8 @@ log_processor = dict(window_size=50)
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=50),
     checkpoint=dict(type='CheckpointHook', interval=1))
-custom_hooks = [dict(type='DisableObjectSampleHook', disable_after_epoch=18)]
+custom_hooks = [
+    dict(
+        type='DisableObjectSampleHook',
+        disable_after_epoch=disable_object_sample_epoch)
+]

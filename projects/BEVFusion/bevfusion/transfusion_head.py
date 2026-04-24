@@ -234,10 +234,16 @@ class TransFusionHead(nn.Module):
             heatmap, kernel_size=self.nms_kernel_size, stride=1, padding=0)
         local_max[:, :, padding:(-padding),
                   padding:(-padding)] = local_max_inner
-        # for Pedestrian & Traffic_cone in nuScenes
+        # Keep densely packed small objects from being over-suppressed during
+        # query initialization.
         if self.test_cfg['dataset'] == 'nuScenes':
             local_max[:, 8, ] = F.max_pool2d(
                 heatmap[:, 8], kernel_size=1, stride=1, padding=0)
+            local_max[:, 9, ] = F.max_pool2d(
+                heatmap[:, 9], kernel_size=1, stride=1, padding=0)
+        elif self.test_cfg['dataset'] == 'KL':
+            local_max[:, 0, ] = F.max_pool2d(
+                heatmap[:, 0], kernel_size=1, stride=1, padding=0)
             local_max[:, 9, ] = F.max_pool2d(
                 heatmap[:, 9], kernel_size=1, stride=1, padding=0)
         elif self.test_cfg[
