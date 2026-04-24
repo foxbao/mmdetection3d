@@ -8,16 +8,19 @@ introduce the TSA encoder that actually consumes ``history_points`` + queue
 metas.
 """
 
-_base_ = ['./bevformer_lidar_kl_base.py']
+_base_ = ['./bevformer_lidar_kl_stage1.py']
 
 queue_length = 4
+batch_size = 4
 
 train_dataloader = dict(
+    batch_size=batch_size,
     dataset=dict(type='KlBEVFormerDataset', queue_length=queue_length))
 
 # Eval also goes through the queue loader so the temporal_encoder sees
 # prev_bev at val/test time, matching the training distribution.
 val_dataloader = dict(
+    batch_size=batch_size,
     dataset=dict(type='KlBEVFormerDataset', queue_length=queue_length))
 test_dataloader = val_dataloader
 
