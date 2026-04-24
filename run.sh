@@ -1,0 +1,2 @@
+python tools/create_data.py kl --root-path ./data/kl --out-dir ./data/kl --extra-tag kl --version v1.0-trainval --max-sweeps 1
+bash tools/dist_train.sh projects/BEVFusion/configs/bevfusion_yx_kl.py 7 --amp

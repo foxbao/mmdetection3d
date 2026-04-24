@@ -107,7 +107,10 @@ venv.bak/
 
 # cython generated cpp
 data
-.vscode
+# Track VSCode JSON configs; ignore everything else under .vscode/
+.vscode/*
+!.vscode/
+!.vscode/*.json
 .idea
 
 # custom
@@ -135,3 +138,15 @@ data/sunrgbd/OFFICIAL_SUNRGBD/
 mmdet3d/evaluation/functional/waymo_utils/compute_detection_metrics_main
 mmdet3d/evaluation/functional/waymo_utils/compute_detection_let_metrics_main
 mmdet3d/evaluation/functional/waymo_utils/compute_segmentation_metrics_main
+
+# Local junk / large artifacts
+.codex
+*.bak
+*_bak.py
+*.onnx
+projects/BEVFusion/qat/input_data/
+projects/BEVFusion/qat/ns_input_data/
+
+# Large local data files — kept on disk but not in the repo. Use git-lfs or
+# external storage if these need to be shared.
+base_map.txt

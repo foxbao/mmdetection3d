@@ -252,7 +252,10 @@ class TransFusionHead(nn.Module):
         # top num_proposals among all classes
         top_proposals = heatmap.view(batch_size, -1).argsort(
             dim=-1, descending=True)[..., :self.num_proposals]
-        top_proposals_class = top_proposals // heatmap.shape[-1]
+        top_proposals_class = torch.div(
+            top_proposals,
+            heatmap.shape[-1],
+            rounding_mode='trunc')
         top_proposals_index = top_proposals % heatmap.shape[-1]
         query_feat = fusion_feat_flatten.gather(
             index=top_proposals_index[:, None, :].expand(
@@ -295,6 +298,10 @@ class TransFusionHead(nn.Module):
             # for next level positional embedding
             query_pos = res_layer['center'].detach().clone().permute(0, 2, 1)
 
+        self._last_query_feat = query_feat
+        self._last_bev_feat = fusion_feat
+        self._last_query_pos = query_pos
+
         ret_dicts[0]['query_heatmap_score'] = heatmap.gather(
             index=top_proposals_index[:,
                                       None, :].expand(-1, self.num_classes,
@@ -318,6 +325,21 @@ class TransFusionHead(nn.Module):
             else:
                 new_res[key] = ret_dicts[0][key]
         return [new_res]
+
+    def export_detection_context(self):
+        """Expose reusable detection-side context for downstream tasks.
+
+        This keeps downstream modules from depending directly on private cache
+        names. The returned tensors are the most recent outputs produced by the
+        detection forward path.
+        """
+        return dict(
+            det_queries=getattr(self, '_last_query_feat', None),
+            det_query_pos=getattr(self, '_last_query_pos', None),
+            bev_memory=getattr(self, '_last_bev_feat', None),
+            query_labels=getattr(self, 'query_labels', None),
+            assign_result=getattr(self, '_cached_assign', None),
+        )
 
     def forward(self, feats, metas):
         """Forward pass.
@@ -480,11 +502,18 @@ class TransFusionHead(nn.Module):
                 else:  # no nms
                     ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
 
+                if self.test_cfg['nms_type'] is not None:
+                    keep_inds = torch.where(keep_mask)[0]
+                else:
+                    keep_inds = torch.arange(len(scores),
+                                             device=scores.device)
+
                 temp_instances = InstanceData()
                 temp_instances.bboxes_3d = metas[0]['box_type_3d'](
                     ret['bboxes'], box_dim=ret['bboxes'].shape[-1])
                 temp_instances.scores_3d = ret['scores']
                 temp_instances.labels_3d = ret['labels'].int()
+                temp_instances._keep_inds = keep_inds
 
                 ret_layer.append(temp_instances)
 
@@ -550,6 +579,9 @@ class TransFusionHead(nn.Module):
         num_pos = np.sum(res_tuple[5])
         matched_ious = np.mean(res_tuple[6])
         heatmap = torch.cat(res_tuple[7], dim=0)
+
+        self._cached_assign = list(zip(res_tuple[8], res_tuple[9]))
+
         return (
             labels,
             label_weights,
@@ -698,10 +730,15 @@ class TransFusionHead(nn.Module):
         grid_size = torch.tensor(self.train_cfg['grid_size'])
         pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
         voxel_size = torch.tensor(self.train_cfg['voxel_size'])
-        feature_map_size = (grid_size[:2] // self.train_cfg['out_size_factor']
-                            )  # [x_len, y_len]
-        heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
-                                         feature_map_size[0])
+        feature_map_size = torch.div(
+            grid_size[:2],
+            self.train_cfg['out_size_factor'],
+            rounding_mode='trunc')  # [x_len, y_len]
+        # 陈旭 chenxu:不改kl就训不出来
+        # heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
+        #                                  feature_map_size[0])
+        heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[0],
+                                         feature_map_size[1])
         for idx in range(len(gt_bboxes_3d)):
             width = gt_bboxes_3d[idx][3]
             length = gt_bboxes_3d[idx][4]
@@ -731,6 +768,12 @@ class TransFusionHead(nn.Module):
                                       center_int[[1, 0]], radius)
 
         mean_iou = ious[pos_inds].sum() / max(len(pos_inds), 1)
+
+        last_start = (num_layer - 1) * self.num_proposals
+        last_mask = pos_inds >= last_start
+        last_pos_inds = pos_inds[last_mask] - last_start
+        last_pos_gt_inds = sampling_result.pos_assigned_gt_inds[last_mask]
+
         return (
             labels[None],
             label_weights[None],
@@ -740,6 +783,8 @@ class TransFusionHead(nn.Module):
             int(pos_inds.shape[0]),
             float(mean_iou),
             heatmap[None],
+            last_pos_inds,
+            last_pos_gt_inds,
         )
 
     def loss(self, batch_feats, batch_data_samples):
@@ -857,6 +902,38 @@ class TransFusionHead(nn.Module):
                                               self.num_proposals:(idx_layer +
                                                                   1) *
                                               self.num_proposals, :, ]
+
+            # π-symmetric rotation: for front-back symmetric classes,
+            # flip GT rotation target (θ → θ+π) if it's closer to prediction.
+            # This eliminates contradictory gradients from ambiguous yaw labels.
+            pi_sym_cls = self.train_cfg.get(
+                'pi_symmetric_class_indices', [])
+            if len(pi_sym_cls) > 0:
+                layer_labels_2d = labels[
+                    :, idx_layer * self.num_proposals:
+                    (idx_layer + 1) * self.num_proposals]
+                sym_mask = torch.zeros_like(
+                    layer_labels_2d, dtype=torch.bool)
+                for cls_idx in pi_sym_cls:
+                    sym_mask |= (layer_labels_2d == cls_idx)
+                if sym_mask.any():
+                    pred_sin = preds[:, :, 6].detach()
+                    pred_cos = preds[:, :, 7].detach()
+                    gt_sin = layer_bbox_targets[:, :, 6]
+                    gt_cos = layer_bbox_targets[:, :, 7]
+                    dist_orig = (pred_sin - gt_sin).abs() + \
+                        (pred_cos - gt_cos).abs()
+                    dist_flip = (pred_sin + gt_sin).abs() + \
+                        (pred_cos + gt_cos).abs()
+                    flip_mask = sym_mask & (dist_flip < dist_orig)
+                    layer_bbox_targets = layer_bbox_targets.clone()
+                    layer_bbox_targets[:, :, 6] = torch.where(
+                        flip_mask, -layer_bbox_targets[:, :, 6],
+                        layer_bbox_targets[:, :, 6])
+                    layer_bbox_targets[:, :, 7] = torch.where(
+                        flip_mask, -layer_bbox_targets[:, :, 7],
+                        layer_bbox_targets[:, :, 7])
+
             layer_loss_bbox = self.loss_bbox(
                 preds,
                 layer_bbox_targets,

@@ -64,7 +64,7 @@ model = dict(
                 num_layers=6,
                 return_intermediate=True,
                 transformerlayers=dict(
-                    type='mmdet.DetrTransformerDecoderLayer',
+                    type='DetrTransformerDecoderLayer',
                     attn_cfgs=[
                         dict(
                             type='MultiheadAttention',  # mmcv.
@@ -250,6 +250,8 @@ default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook', interval=1, max_keep_ckpts=1, save_last=True))
 load_from = 'ckpts/fcos3d.pth'
+# fcos3d was trained with 8 GPUs x bs1; auto-scale LR when GPU count differs
+auto_scale_lr = dict(enable=True, base_batch_size=8)
 
 # setuptools 65 downgrades to 58.
 # In mmlab-node we use setuptools 61 but occurs NO errors

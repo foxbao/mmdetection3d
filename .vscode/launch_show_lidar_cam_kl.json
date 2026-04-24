@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BEVFusion Test (Single GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/infer.py",
+      "args": [
+        "--config","projects/BEVFusion/configs/bevfusion_lidar_camera_yx_kl.py",
+        "--checkpoint","work_dirs/bevfusion_lidar_camera_yx_kl/epoch_6.pth",
+        "--vis-mode","multi",
+        "--no-aug"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

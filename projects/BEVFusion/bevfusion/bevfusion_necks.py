@@ -97,3 +97,115 @@ class GeneralizedLSSFPN(BaseModule):
         # build outputs
         outs = [laterals[i] for i in range(used_backbone_levels)]
         return tuple(outs)
+
+
+class BasicBlock(nn.Module):
+    """Basic residual block for GeneralizedResNet."""
+
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels, out_channels, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(
+            out_channels, out_channels, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_channels, out_channels, 1,
+                    stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+        else:
+            self.downsample = None
+
+    def forward(self, x):
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        out = self.relu(out)
+        return out
+
+
+@MODELS.register_module()
+class GeneralizedResNet(BaseModule):
+    """Generalized ResNet backbone for BEV features.
+
+    Ref: https://github.com/mit-han-lab/bevfusion
+
+    Args:
+        in_channels (int): Input channels (e.g., 80 for camera BEV).
+        blocks (list): List of [num_blocks, out_channels, stride] per stage.
+    """
+
+    def __init__(self, in_channels, blocks):
+        super().__init__()
+        self.blocks = blocks
+        self.stages = nn.ModuleList()
+        current_channels = in_channels
+        for num_blocks, out_channels, stride in blocks:
+            layers = []
+            layers.append(BasicBlock(current_channels, out_channels, stride))
+            for _ in range(1, num_blocks):
+                layers.append(BasicBlock(out_channels, out_channels, 1))
+            self.stages.append(nn.Sequential(*layers))
+            current_channels = out_channels
+
+    def forward(self, x):
+        outputs = []
+        for stage in self.stages:
+            x = stage(x)
+            outputs.append(x)
+        return outputs
+
+
+@MODELS.register_module()
+class LSSFPN(BaseModule):
+    """LSS-style FPN for BEV features.
+
+    Ref: https://github.com/mit-han-lab/bevfusion
+
+    Args:
+        in_channels (list[int]): Input channels from selected stages.
+        in_indices (list[int]): Indices of stages to use.
+        out_channels (int): Output channels.
+        scale_factor (int): Upsample scale factor.
+    """
+
+    def __init__(self, in_channels, in_indices, out_channels, scale_factor=2):
+        super().__init__()
+        self.in_indices = in_indices
+        self.fuse = nn.Sequential(
+            nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.scale_factor = scale_factor
+
+    def forward(self, inputs):
+        # inputs is a list of feature maps from GeneralizedResNet
+        target = inputs[self.in_indices[0]]
+        feats = []
+        for idx in self.in_indices:
+            feat = inputs[idx]
+            if feat.shape[2:] != target.shape[2:]:
+                feat = F.interpolate(
+                    feat, size=target.shape[2:],
+                    mode='bilinear', align_corners=True)
+            feats.append(feat)
+        x = self.fuse(torch.cat(feats, dim=1))
+        if self.scale_factor != 1:
+            x = F.interpolate(
+                x, scale_factor=self.scale_factor,
+                mode='bilinear', align_corners=True)
+        return x

@@ -1,5 +1,5 @@
 from .bevfusion import BEVFusion
-from .bevfusion_necks import GeneralizedLSSFPN
+from .bevfusion_necks import GeneralizedLSSFPN, GeneralizedResNet, LSSFPN
 from .depth_lss import DepthLSSTransform, LSSTransform
 from .loading import BEVLoadMultiViewImageFromFiles
 from .sparse_encoder import BEVFusionSparseEncoder
@@ -12,7 +12,8 @@ from .utils import (BBoxBEVL1Cost, HeuristicAssigner3D, HungarianAssigner3D,
 
 __all__ = [
     'BEVFusion', 'TransFusionHead', 'ConvFuser', 'ImageAug3D', 'GridMask',
-    'GeneralizedLSSFPN', 'HungarianAssigner3D', 'BBoxBEVL1Cost', 'IoU3DCost',
+    'GeneralizedLSSFPN', 'GeneralizedResNet', 'LSSFPN',
+    'HungarianAssigner3D', 'BBoxBEVL1Cost', 'IoU3DCost',
     'HeuristicAssigner3D', 'DepthLSSTransform', 'LSSTransform',
     'BEVLoadMultiViewImageFromFiles', 'BEVFusionSparseEncoder',
     'TransformerDecoderLayer', 'BEVFusionRandomFlip3D',

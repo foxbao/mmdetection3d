@@ -44,6 +44,9 @@ class DETR3DHead(DETRHead):
             num_cls_fcs=2,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
             code_size=10,
+            num_query=900,
+            in_channels=None,
+            positional_encoding=None,
             **kwargs):
         self.with_box_refine = with_box_refine
         self.as_two_stage = as_two_stage
@@ -51,12 +54,18 @@ class DETR3DHead(DETRHead):
             transformer['as_two_stage'] = self.as_two_stage
         self.code_size = code_size
         self.code_weights = code_weights
+        self.num_query = num_query
 
         self.bbox_coder = TASK_UTILS.build(bbox_coder)
         self.pc_range = self.bbox_coder.pc_range
         self.num_cls_fcs = num_cls_fcs - 1
-        super(DETR3DHead, self).__init__(
-            *args, transformer=transformer, **kwargs)
+        # Store transformer config; we build it inside _init_layers() so that
+        # nn.Module.__init__() (called by super) runs first — PyTorch requires
+        # Module.__init__ before any nn.Module attribute assignment.
+        # Newer mmdet's DETRHead no longer accepts transformer/num_query/
+        # in_channels/positional_encoding kwargs, so we handle them here.
+        self._transformer_cfg = transformer
+        super(DETR3DHead, self).__init__(*args, **kwargs)
         # DETR sampling=False, so use PseudoSampler, format the result
         sampler_cfg = dict(type='PseudoSampler')
         self.sampler = TASK_UTILS.build(sampler_cfg)
@@ -68,6 +77,9 @@ class DETR3DHead(DETRHead):
     # forward_train -> loss
     def _init_layers(self):
         """Initialize classification branch and regression branch of head."""
+        # Build transformer here: nn.Module.__init__ has been called by
+        # super().__init__, so Module attribute assignment is now safe.
+        self.transformer = MODELS.build(self._transformer_cfg)
         cls_branch = []
         for _ in range(self.num_reg_fcs):
             cls_branch.append(Linear(self.embed_dims, self.embed_dims))
@@ -221,7 +233,7 @@ class DETR3DHead(DETRHead):
             sampling_result.pos_gt_bboxes = \
                 sampling_result.pos_gt_bboxes.reshape(0, self.code_size - 1)
 
-        bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
+        bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes.to(bbox_targets.dtype)
         return (labels, label_weights, bbox_targets, bbox_weights, pos_inds,
                 neg_inds)
 

@@ -296,6 +296,105 @@ def inference_multi_modality_detector(model: nn.Module,
         return results, data
 
 
+# def inference_multi_modality_detector_bao(
+#     model,
+#     pcds,
+#     img_paths,
+# ):
+#     """
+#     Multi-modality inference for BEVFusion-style models.
+
+#     Args:
+#         model (nn.Module): loaded detector (eval mode)
+#         pcds (str | np.ndarray | list): lidar path(s) or loaded points
+#         img_paths (dict | list[dict]):
+#             {
+#                 'CAM_FRONT': xxx.jpg,
+#                 'CAM_BACK':  xxx.jpg,
+#                 ...
+#             }
+
+#     Returns:
+#         result (Det3DDataSample or list)
+#         data   (pipeline-processed input dict)
+#     """
+
+#     # ------------------------------------------------
+#     # 0. batch or single
+#     # ------------------------------------------------
+#     if isinstance(pcds, (list, tuple)):
+#         is_batch = True
+#     else:
+#         pcds = [pcds]
+#         img_paths = [img_paths]
+#         is_batch = False
+
+#     assert len(pcds) == len(img_paths)
+    
+#     # ------------------------------------------------
+#     # 1. cfg & pipeline
+#     # ------------------------------------------------
+#     cfg = model.cfg
+#     cfg = cfg.copy()
+
+#     test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
+#     test_pipeline = Compose(test_pipeline)
+
+#     box_type_3d, box_mode_3d = get_box_type(
+#         cfg.test_dataloader.dataset.box_type_3d
+#     )
+
+#     # ------------------------------------------------
+#     # 2. prepare data (🔥 核心)
+#     # ------------------------------------------------
+#     data = []
+#     for pcd, img_path in zip(pcds, img_paths):
+
+#         if isinstance(pcd, str):
+#             # ---- 从文件加载 lidar ----
+#             data_ = dict(
+#                 lidar_points=dict(lidar_path=pcd),
+#             )
+#         else:
+#             # ---- 直接给 points ----
+#             data_ = dict(
+#                 points=pcd,
+#             )
+
+#         # ---- multi-view images ----
+#         # ⚠️ 字段名必须和 dataset 里 LoadMultiViewImageFromFiles 对齐
+#         data_.update(
+#             dict(
+#                 images=dict(
+#                     img_path=img_path,   # dict: cam_name -> path
+#                 ),
+#                 timestamp=1,
+#                 box_type_3d=box_type_3d,
+#                 box_mode_3d=box_mode_3d,
+#             )
+#         )
+
+#         # ---- pipeline (和 dataset 完全一致) ----
+#         data_ = test_pipeline(data_)
+#         data.append(data_)
+
+#     # ------------------------------------------------
+#     # 3. collate & forward
+#     # ------------------------------------------------
+#     collate_data = pseudo_collate(data)
+
+#     with torch.no_grad():
+#         results = model.test_step(collate_data)
+
+#     # ------------------------------------------------
+#     # 4. return
+#     # ------------------------------------------------
+#     if not is_batch:
+#         return results[0], data[0]
+#     else:
+#         return results, data
+
+
 def inference_mono_3d_detector(model: nn.Module,
                                imgs: ImagesType,
                                ann_file: Union[str, Sequence[str]],

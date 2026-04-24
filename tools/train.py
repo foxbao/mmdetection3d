@@ -122,8 +122,14 @@ def main():
 
     # resume is determined in this priority: resume from > auto_resume
     if args.resume == 'auto':
-        cfg.resume = True
-        cfg.load_from = None
+        last_ckpt = osp.join(cfg.work_dir, 'last_checkpoint')
+        if osp.isfile(last_ckpt):
+            # A real training checkpoint exists: resume from it and ignore
+            # load_from (resuming overrides pretrained weight loading).
+            cfg.resume = True
+            cfg.load_from = None
+        # else: no checkpoint yet (first run), leave cfg.resume and
+        # cfg.load_from untouched so pretrained weights are loaded normally.
     elif args.resume is not None:
         cfg.resume = True
         cfg.load_from = args.resume

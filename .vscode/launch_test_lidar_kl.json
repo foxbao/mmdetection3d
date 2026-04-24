@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BEVFusion Test (Single GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/test.py",
+      "args": [
+        "projects/BEVFusion/configs/bevfusion_yx_kl.py",
+        "work_dirs/bevfusion_yx_kl/epoch_2.pth",
+        "--launcher",
+        "none"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "create_data_kl",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/tools/create_data.py",
+        "args": [
+          "nuscenes",
+          "--root-path", "./data/nuscenes",
+          "--out-dir", "./data/nuscenes",
+          "--extra-tag", "nuscenes",
+          "--version", "v1.0-mini"
+        ],
+        "console": "integratedTerminal",
+        "justMyCode": false
+      }
+    ]
+  }
+  

@@ -8,11 +8,12 @@ from tools.dataset_converters import indoor_converter as indoor
 from tools.dataset_converters import kitti_converter as kitti
 from tools.dataset_converters import lyft_converter as lyft_converter
 from tools.dataset_converters import nuscenes_converter as nuscenes_converter
+from tools.dataset_converters import kl_converter as kl_converter
 from tools.dataset_converters import semantickitti_converter
 from tools.dataset_converters.create_gt_database import (
     GTDatabaseCreater, create_groundtruth_database)
 from tools.dataset_converters.update_infos_to_v2 import update_pkl_infos
-
+from mmengine.config import Config
 
 def kitti_data_prep(root_path,
                     info_prefix,
@@ -88,6 +89,71 @@ def nuscenes_data_prep(root_path,
     create_groundtruth_database(dataset_name, root_path, info_prefix,
                                 f'{info_prefix}_infos_train.pkl')
 
+def kl_data_prep(root_path,
+                       info_prefix,
+                       version,
+                       dataset_name,
+                       out_dir,
+                       cfg=None):
+    """Prepare data related to kl dataset.
+
+    Related data consists of '.pkl' files recording basic infos,
+    2D annotations and groundtruth database.
+
+    Args:
+        root_path (str): Path of dataset root.
+        info_prefix (str): The prefix of info filenames.
+        version (str): Dataset version.
+        dataset_name (str): The dataset class name.
+        out_dir (str): Output directory of the groundtruth database info.
+    """
+    kl_converter.create_kl_infos(
+        root_path, info_prefix, version=version, cfg=cfg)
+
+
+    info_train_path = osp.join(out_dir, f'{info_prefix}_infos_train.pkl')
+    info_val_path = osp.join(out_dir, f'{info_prefix}_infos_val.pkl')
+    update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_train_path)
+    update_pkl_infos('kl', out_dir=out_dir, pkl_path=info_val_path)
+
+    temporal_chain_cfg = {}
+    if cfg is not None and hasattr(cfg, 'temporal_chain_cfg'):
+        temporal_chain_cfg = dict(cfg.temporal_chain_cfg)
+    temporal_chain_enabled = bool(temporal_chain_cfg.get('enable', True))
+
+    forecast_cfg = {}
+    if cfg is not None and hasattr(cfg, 'forecast_cfg'):
+        forecast_cfg = dict(cfg.forecast_cfg)
+    forecast_enabled = bool(forecast_cfg.get('enable', True))
+    forecast_steps = int(forecast_cfg.get('forecast_steps', 6))
+
+    # Add GT forecasting trajectories only when both forecasting and
+    # temporal links are enabled.
+    if temporal_chain_enabled and forecast_enabled:
+        from tools.dataset_converters.add_forecasting import \
+            add_forecasting_to_pkl
+        add_forecasting_to_pkl(info_train_path, forecast_steps=forecast_steps)
+        add_forecasting_to_pkl(info_val_path, forecast_steps=forecast_steps)
+    elif not temporal_chain_enabled:
+        print('[KL] temporal_chain_cfg.enable=False, skip forecasting '
+              'trajectory generation because prev/next links are disabled')
+    else:
+        print('[KL] forecast_cfg.enable=False, skip forecasting trajectory '
+              'generation')
+
+    # Add nuScenes-style object velocities from track_id trajectories.  Keep the
+    # original pkl names untouched and write explicit velocity variants so
+    # configs can opt in without changing other KL experiments.
+    from tools.dataset_converters.add_velocity import add_velocity_to_pkl
+    info_train_vel_path = osp.join(
+        out_dir, f'{info_prefix}_infos_train_with_velocity.pkl')
+    info_val_vel_path = osp.join(
+        out_dir, f'{info_prefix}_infos_val_with_velocity.pkl')
+    add_velocity_to_pkl(info_train_path, out_path=info_train_vel_path)
+    add_velocity_to_pkl(info_val_path, out_path=info_val_vel_path)
+
+    create_groundtruth_database(dataset_name, root_path, info_prefix,
+                                f'{info_prefix}_infos_train.pkl')
 
 def lyft_data_prep(root_path, info_prefix, version, max_sweeps=10):
     """Prepare data related to Lyft dataset.
@@ -312,12 +378,20 @@ parser.add_argument(
     action='store_true',
     help='''Whether to skip saving image and lidar.
         Only used when dataset is Waymo!''')
+parser.add_argument(
+    '--cfg',
+    type=str,
+    default=None,
+    help='extra config file for data preparation')
 args = parser.parse_args()
 
 if __name__ == '__main__':
     from mmengine.registry import init_default_scope
     init_default_scope('mmdet3d')
 
+    cfg = None
+    if args.cfg is not None:
+        cfg = Config.fromfile(args.cfg)
     if args.dataset == 'kitti':
         if args.only_gt_database:
             create_groundtruth_database(
@@ -382,6 +456,20 @@ if __name__ == '__main__':
             only_gt_database=args.only_gt_database,
             save_senor_data=not args.skip_saving_sensor_data,
             skip_cam_instances_infos=args.skip_cam_instances_infos)
+    elif args.dataset == 'kl':
+        # if args.only_gt_database:
+        #     create_groundtruth_database('KlDataset', args.root_path,
+        #                                 args.extra_tag,
+        #                                 f'{args.extra_tag}_infos_train.pkl')
+        # else:
+        train_version = f'{args.version}'
+        kl_data_prep(
+            root_path=args.root_path,
+            info_prefix=args.extra_tag,
+            version=train_version,
+            dataset_name='KlDataset',
+            out_dir=args.out_dir,
+            cfg=cfg)
     elif args.dataset == 'lyft':
         train_version = f'{args.version}-train'
         lyft_data_prep(

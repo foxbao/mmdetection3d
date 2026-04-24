@@ -437,6 +437,16 @@ class ObjectSample(BaseTransform):
             gt_bboxes_3d = gt_bboxes_3d.new_box(
                 np.concatenate([gt_bboxes_3d.numpy(), sampled_gt_bboxes_3d]))
 
+            n_sampled = len(sampled_gt_labels)
+            if 'gt_forecasting_locs' in input_dict:
+                fl = input_dict['gt_forecasting_locs']
+                pad = np.zeros((n_sampled,) + fl.shape[1:], dtype=fl.dtype)
+                input_dict['gt_forecasting_locs'] = np.concatenate([fl, pad])
+            if 'gt_forecasting_mask' in input_dict:
+                fm = input_dict['gt_forecasting_mask']
+                pad = np.zeros((n_sampled,) + fm.shape[1:], dtype=fm.dtype)
+                input_dict['gt_forecasting_mask'] = np.concatenate([fm, pad])
+
             points = self.remove_points_in_boxes(points, sampled_gt_bboxes_3d)
             # check the points dimension
             points = points.cat([sampled_points, points])
@@ -701,8 +711,12 @@ class GlobalRotScaleTrans(BaseTransform):
             dict: Results after translation, 'points', 'pcd_trans'
             and `gt_bboxes_3d` is updated in the result dict.
         """
-        translation_std = np.array(self.translation_std, dtype=np.float32)
-        trans_factor = np.random.normal(scale=translation_std, size=3).T
+        if 'pcd_trans' in input_dict:
+            trans_factor = np.asarray(
+                input_dict['pcd_trans'], dtype=np.float32)
+        else:
+            translation_std = np.array(self.translation_std, dtype=np.float32)
+            trans_factor = np.random.normal(scale=translation_std, size=3).T
 
         input_dict['points'].translate(trans_factor)
         input_dict['pcd_trans'] = trans_factor
@@ -719,8 +733,11 @@ class GlobalRotScaleTrans(BaseTransform):
             dict: Results after rotation, 'points', 'pcd_rotation'
             and `gt_bboxes_3d` is updated in the result dict.
         """
-        rotation = self.rot_range
-        noise_rotation = np.random.uniform(rotation[0], rotation[1])
+        if 'pcd_rotation_angle' in input_dict:
+            noise_rotation = float(input_dict['pcd_rotation_angle'])
+        else:
+            rotation = self.rot_range
+            noise_rotation = np.random.uniform(rotation[0], rotation[1])
 
         if 'gt_bboxes_3d' in input_dict and \
                 len(input_dict['gt_bboxes_3d'].tensor) != 0:
@@ -892,6 +909,11 @@ class ObjectRangeFilter(BaseTransform):
         input_dict['gt_bboxes_3d'] = gt_bboxes_3d
         input_dict['gt_labels_3d'] = gt_labels_3d
 
+        np_mask = mask.numpy().astype(bool)
+        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+            if key in input_dict:
+                input_dict[key] = input_dict[key][np_mask]
+
         return input_dict
 
     def __repr__(self) -> str:
@@ -991,6 +1013,10 @@ class ObjectNameFilter(BaseTransform):
                                   dtype=bool)
         input_dict['gt_bboxes_3d'] = input_dict['gt_bboxes_3d'][gt_bboxes_mask]
         input_dict['gt_labels_3d'] = input_dict['gt_labels_3d'][gt_bboxes_mask]
+
+        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+            if key in input_dict:
+                input_dict[key] = input_dict[key][gt_bboxes_mask]
 
         return input_dict
 

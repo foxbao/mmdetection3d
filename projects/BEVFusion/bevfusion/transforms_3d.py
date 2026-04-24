@@ -124,6 +124,8 @@ class BEVFusionRandomFlip3D:
                 data['points'].flip('horizontal')
             if 'gt_bboxes_3d' in data:
                 data['gt_bboxes_3d'].flip('horizontal')
+            if 'gt_forecasting_locs' in data:
+                data['gt_forecasting_locs'][..., 1] *= -1
             if 'gt_masks_bev' in data:
                 data['gt_masks_bev'] = data['gt_masks_bev'][:, :, ::-1].copy()
 
@@ -133,6 +135,8 @@ class BEVFusionRandomFlip3D:
                 data['points'].flip('vertical')
             if 'gt_bboxes_3d' in data:
                 data['gt_bboxes_3d'].flip('vertical')
+            if 'gt_forecasting_locs' in data:
+                data['gt_forecasting_locs'][..., 0] *= -1
             if 'gt_masks_bev' in data:
                 data['gt_masks_bev'] = data['gt_masks_bev'][:, ::-1, :].copy()
 
@@ -147,6 +151,57 @@ class BEVFusionRandomFlip3D:
 class BEVFusionGlobalRotScaleTrans(GlobalRotScaleTrans):
     """Compared with `GlobalRotScaleTrans`, the augmentation order in this
     class is rotation, translation and scaling (RTS)."""
+
+    def _rot_bbox_points(self, input_dict: dict) -> None:
+        rotation = self.rot_range
+        noise_rotation = np.random.uniform(rotation[0], rotation[1])
+
+        if 'points' in input_dict:
+            if 'gt_bboxes_3d' in input_dict and \
+                    len(input_dict['gt_bboxes_3d'].tensor) != 0:
+                points, rot_mat_T = input_dict['gt_bboxes_3d'].rotate(
+                    noise_rotation, input_dict['points'])
+                input_dict['points'] = points
+            else:
+                rot_mat_T = input_dict['points'].rotate(noise_rotation)
+        else:
+            if 'gt_bboxes_3d' in input_dict and \
+                    len(input_dict['gt_bboxes_3d'].tensor) != 0:
+                input_dict['gt_bboxes_3d'].rotate(noise_rotation)
+            rot_mat_T = torch.Tensor([
+                [np.cos(noise_rotation), -np.sin(noise_rotation), 0],
+                [np.sin(noise_rotation), np.cos(noise_rotation), 0],
+                [0, 0, 1],
+            ])
+
+        input_dict['pcd_rotation'] = rot_mat_T
+        input_dict['pcd_rotation_angle'] = noise_rotation
+        if 'gt_forecasting_locs' in input_dict:
+            rot_mat = rot_mat_T[:2, :2]
+            if isinstance(input_dict['gt_forecasting_locs'], np.ndarray):
+                rot_mat = rot_mat.cpu().numpy()
+            input_dict['gt_forecasting_locs'] = (
+                input_dict['gt_forecasting_locs'] @ rot_mat)
+
+    def _trans_bbox_points(self, input_dict: dict) -> None:
+        translation_std = np.array(self.translation_std, dtype=np.float32)
+        trans_factor = np.random.normal(scale=translation_std, size=3).T
+
+        if 'points' in input_dict:
+            input_dict['points'].translate(trans_factor)
+        input_dict['pcd_trans'] = trans_factor
+        if 'gt_bboxes_3d' in input_dict:
+            input_dict['gt_bboxes_3d'].translate(trans_factor)
+
+    def _scale_bbox_points(self, input_dict: dict) -> None:
+        scale = input_dict['pcd_scale_factor']
+        if 'points' in input_dict:
+            input_dict['points'].scale(scale)
+        if 'gt_bboxes_3d' in input_dict and \
+                len(input_dict['gt_bboxes_3d'].tensor) != 0:
+            input_dict['gt_bboxes_3d'].scale(scale)
+        if 'gt_forecasting_locs' in input_dict:
+            input_dict['gt_forecasting_locs'] *= scale
 
     def transform(self, input_dict: dict) -> dict:
         """Private function to rotate, scale and translate bounding boxes and

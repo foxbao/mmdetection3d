@@ -16,6 +16,63 @@ from mmdet3d.structures import Det3DDataSample, xywhr2xyxyr
 from ..layers import circle_nms, nms_bev
 
 
+def _expand_nms_types(nms_type: Union[str, List[str], Tuple[str, ...]],
+                      num_tasks: int) -> List[str]:
+    """Normalize NMS type config into one entry per task."""
+    if isinstance(nms_type, str):
+        nms_types = [nms_type for _ in range(num_tasks)]
+    else:
+        assert len(nms_type) == num_tasks, \
+            'nms_type should provide one value per task.'
+        nms_types = list(nms_type)
+
+    for task_nms_type in nms_types:
+        assert task_nms_type in ['circle', 'rotate'], \
+            'nms_type should be "circle" or "rotate".'
+    return nms_types
+
+
+def _expand_nms_scales(
+        nms_scale: Optional[Union[float, List, Tuple]],
+        num_classes: List[int]) -> List[List[float]]:
+    """Normalize NMS scale config into one scale list per task."""
+    if nms_scale is None:
+        return [[1.0 for _ in range(num_class)] for num_class in num_classes]
+
+    if isinstance(nms_scale, (int, float)):
+        scale = float(nms_scale)
+        return [[scale for _ in range(num_class)] for num_class in num_classes]
+
+    if len(num_classes) == 1 and all(
+            isinstance(scale, (int, float)) for scale in nms_scale):
+        assert len(nms_scale) == num_classes[0], \
+            'Single-task nms_scale should match the number of classes.'
+        return [[float(scale) for scale in nms_scale]]
+
+    assert len(nms_scale) == len(num_classes), \
+        'nms_scale should provide one value per task.'
+    nms_scales: List[List[float]] = []
+    for task_id, (task_scale, num_class) in enumerate(
+            zip(nms_scale, num_classes)):
+        if isinstance(task_scale, (int, float)):
+            nms_scales.append([float(task_scale) for _ in range(num_class)])
+        else:
+            assert len(task_scale) == num_class, \
+                f'nms_scale[{task_id}] should have {num_class} values.'
+            nms_scales.append([float(scale) for scale in task_scale])
+    return nms_scales
+
+
+def _limit_max_per_img(bboxes, scores: Tensor, labels: Tensor,
+                       max_per_img: Optional[int]):
+    """Keep only the top-scoring predictions after merging all tasks."""
+    if max_per_img is None or len(scores) <= max_per_img:
+        return bboxes, scores, labels
+
+    _, topk_inds = scores.topk(max_per_img)
+    return bboxes[topk_inds], scores[topk_inds], labels[topk_inds]
+
+
 @MODELS.register_module()
 class SeparateHead(BaseModule):
     """SeparateHead for CenterHead.
@@ -474,7 +531,10 @@ class CenterHead(BaseModule):
         pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
         voxel_size = torch.tensor(self.train_cfg['voxel_size'])
 
-        feature_map_size = grid_size[:2] // self.train_cfg['out_size_factor']
+        feature_map_size = torch.div(
+            grid_size[:2],
+            self.train_cfg['out_size_factor'],
+            rounding_mode='trunc')
 
         # reorganize the gt_dict by tasks
         task_masks = []
@@ -718,6 +778,10 @@ class CenterHead(BaseModule):
                   the last 2 dimensions of 9 is
                   velocity.
         """
+        nms_types = _expand_nms_types(self.test_cfg['nms_type'],
+                                      len(preds_dicts))
+        nms_scales = _expand_nms_scales(self.test_cfg.get('nms_scale', None),
+                                        self.num_classes)
         rets = []
         for task_id, preds_dict in enumerate(preds_dicts):
             num_class_with_bg = self.num_classes[task_id]
@@ -748,11 +812,10 @@ class CenterHead(BaseModule):
                 batch_vel,
                 reg=batch_reg,
                 task_id=task_id)
-            assert self.test_cfg['nms_type'] in ['circle', 'rotate']
             batch_reg_preds = [box['bboxes'] for box in temp]
             batch_cls_preds = [box['scores'] for box in temp]
             batch_cls_labels = [box['labels'] for box in temp]
-            if self.test_cfg['nms_type'] == 'circle':
+            if nms_types[task_id] == 'circle':
                 ret_task = []
                 for i in range(batch_size):
                     boxes3d = temp[i]['bboxes']
@@ -779,7 +842,8 @@ class CenterHead(BaseModule):
                     self.get_task_detections(num_class_with_bg,
                                              batch_cls_preds, batch_reg_preds,
                                              batch_cls_labels,
-                                             batch_input_metas))
+                                             batch_input_metas,
+                                             nms_scales[task_id]))
 
         # Merge branches results
         num_samples = len(rets[0])
@@ -801,14 +865,21 @@ class CenterHead(BaseModule):
                         rets[j][i][k] += flag
                         flag += num_class
                     labels = torch.cat([ret[i][k].int() for ret in rets])
+            bboxes, scores, labels = _limit_max_per_img(
+                bboxes, scores, labels, self.test_cfg.get('max_per_img'))
             temp_instances.bboxes_3d = bboxes
             temp_instances.scores_3d = scores
             temp_instances.labels_3d = labels
             ret_list.append(temp_instances)
         return ret_list
 
-    def get_task_detections(self, num_class_with_bg, batch_cls_preds,
-                            batch_reg_preds, batch_cls_labels, img_metas):
+    def get_task_detections(self,
+                            num_class_with_bg,
+                            batch_cls_preds,
+                            batch_reg_preds,
+                            batch_cls_labels,
+                            img_metas,
+                            nms_scale: Optional[List[float]] = None):
         """Rotate nms for each task.
 
         Args:
@@ -820,6 +891,8 @@ class CenterHead(BaseModule):
             batch_cls_labels (list[torch.Tensor]): Prediction label with the
                 shape of [N].
             img_metas (list[dict]): Meta information of each sample.
+            nms_scale (list[float], optional): Per-class box rescale factors
+                applied before rotate NMS. Defaults to None.
 
         Returns:
             list[dict[str: torch.Tensor]]: contains the following keys:
@@ -869,8 +942,14 @@ class CenterHead(BaseModule):
                     box_preds = box_preds[top_scores_keep]
                     top_labels = top_labels[top_scores_keep]
 
-                boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](
-                    box_preds[:, :], self.bbox_coder.code_size).bev)
+                bev_boxes = img_metas[i]['box_type_3d'](
+                    box_preds[:, :], self.bbox_coder.code_size).bev
+                if nms_scale is not None:
+                    bev_boxes = bev_boxes.clone()
+                    for cls, scale in enumerate(nms_scale):
+                        cls_mask = top_labels == cls
+                        bev_boxes[cls_mask, 2:4] *= scale
+                boxes_for_nms = xywhr2xyxyr(bev_boxes)
                 # the nms in 3d detection just remove overlap boxes.
 
                 selected = nms_bev(

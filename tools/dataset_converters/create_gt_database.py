@@ -217,6 +217,23 @@ def create_groundtruth_database(dataset_class_name,
                     with_label_3d=True,
                     backend_args=backend_args)
             ])
+        
+    elif dataset_class_name == 'KlDataset':
+         dataset_cfg.update(
+            use_valid_flag=True,
+            data_prefix=dict(
+                pts='v1.0-trainval/samples', img='', sweeps='v1.0-trainval/samples'),
+            pipeline=[
+                dict(
+                    type='LoadPointsFromFile',
+                    coord_type='LIDAR',
+                    load_dim=5,
+                    use_dim=5),
+                dict(
+                    type='LoadAnnotations3D',
+                    with_bbox_3d=True,
+                    with_label_3d=True)
+            ])
 
     dataset = DATASETS.build(dataset_cfg)
 

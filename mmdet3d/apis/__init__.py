@@ -9,7 +9,7 @@ from .inferencers import (Base3DInferencer, LidarDet3DInferencer,
 
 __all__ = [
     'inference_detector', 'init_model', 'inference_mono_3d_detector',
-    'convert_SyncBN', 'inference_multi_modality_detector',
+    'convert_SyncBN', 'inference_multi_modality_detector'
     'inference_segmentor', 'Base3DInferencer', 'MonoDet3DInferencer',
     'LidarDet3DInferencer', 'LidarSeg3DInferencer',
     'MultiModalityDet3DInferencer'
