@@ -12,7 +12,7 @@
         "--out-dir", "./data/kl_8",
         "--extra-tag", "kl",
         "--version", "v1.0-trainval",
-        "--cfg", "projects/BEVFusion/configs/kl_8.py"
+        "--cfg", "projects/KL8/configs/data_prep.py"
       ],
       "console": "integratedTerminal",
       "justMyCode": false
