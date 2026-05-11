@@ -111,7 +111,10 @@ model = dict(
             gaussian_overlap=0.1,
             min_radius=2,
             pos_weight=-1,
-            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
+            # Single-frame input on KL: no Δt channel, vel head has no
+            # temporal cue. Zero out vel weights to keep detection signal
+            # clean. See bevfusion_lidar_kl_base.py for full rationale.
+            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
             assigner=dict(
                 type='HungarianAssigner3D',
                 iou_calculator=dict(type='BboxOverlaps3D', coordinate='lidar'),

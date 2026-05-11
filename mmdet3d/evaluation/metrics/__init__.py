@@ -8,8 +8,10 @@ from .panoptic_seg_metric import PanopticSegMetric  # noqa: F401,F403
 from .seg_metric import SegMetric  # noqa: F401,F403
 from .waymo_metric import WaymoMetric  # noqa: F401,F403
 from .kl_metric import KlMetric  # noqa: F401,F403
+from .kl_tracking_metric import KlTrackingMetric  # noqa: F401,F403
 
 __all__ = [
     'KittiMetric', 'NuScenesMetric', 'IndoorMetric', 'LyftMetric', 'SegMetric',
-    'InstanceSegMetric', 'WaymoMetric', 'PanopticSegMetric', 'KlMetric'
+    'InstanceSegMetric', 'WaymoMetric', 'PanopticSegMetric', 'KlMetric',
+    'KlTrackingMetric'
 ]

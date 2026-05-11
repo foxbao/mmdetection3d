@@ -66,6 +66,18 @@ forecast_cfg = dict(
     forecast_steps=6)
 
 
+# Per-instance velocity from track_id centered differences (nuScenes style).
+# Written in place to ``instance['velocity']`` so KlDataset(with_velocity=True)
+# loads it directly into ``gt_bboxes_3d[:, 7:9]`` and KlMetric reads non-zero
+# GT for vel_err. Disable only if you intentionally want zero-velocity
+# placeholders for a detection-only sanity run.
+velocity_cfg = dict(
+    enable=True,
+    min_dt=1e-3,
+    max_time_diff=1.5,
+    max_speed=60.0)
+
+
 # Backward-compatible merged view for older tooling that still reads sync_cfg.
 sync_cfg = dict(sensor_sync_cfg)
 if temporal_chain_cfg.get('enable', True):

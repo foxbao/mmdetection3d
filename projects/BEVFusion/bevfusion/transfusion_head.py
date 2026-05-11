@@ -743,6 +743,8 @@ class TransFusionHead(nn.Module):
         # 陈旭 chenxu:不改kl就训不出来
         # heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[1],
         #                                  feature_map_size[0])
+        # BEVFusionSparseEncoder keeps BEV features in [x_len, y_len]
+        # order because project voxelization emits [x, y, z] coordinates.
         heatmap = gt_bboxes_3d.new_zeros(self.num_classes, feature_map_size[0],
                                          feature_map_size[1])
         for idx in range(len(gt_bboxes_3d)):
@@ -770,6 +772,8 @@ class TransFusionHead(nn.Module):
                 # original
                 # draw_heatmap_gaussian(heatmap[gt_labels_3d[idx]], center_int, radius) # noqa: E501
                 # NOTE: fix
+                # draw_heatmap_gaussian writes conventional heatmap[y, x].
+                # Swap the center so it writes into our [x_len, y_len] target.
                 draw_heatmap_gaussian(heatmap[gt_labels_3d[idx]],
                                       center_int[[1, 0]], radius)
 
@@ -834,8 +838,15 @@ class TransFusionHead(nn.Module):
         loss_dict = dict()
 
         # compute heatmap loss
+        pred_heatmap = preds_dict['dense_heatmap']
+        if pred_heatmap.shape != heatmap.shape:
+            raise AssertionError(
+                'dense_heatmap and target heatmap shape mismatch: '
+                f'pred={tuple(pred_heatmap.shape)}, '
+                f'target={tuple(heatmap.shape)}. Check BEV feature layout '
+                'and TransFusionHead heatmap target order.')
         loss_heatmap = self.loss_heatmap(
-            clip_sigmoid(preds_dict['dense_heatmap']).float(),
+            clip_sigmoid(pred_heatmap).float(),
             heatmap.float(),
             avg_factor=max(heatmap.eq(1).float().sum().item(), 1),
         )

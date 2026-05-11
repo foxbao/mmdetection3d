@@ -147,7 +147,9 @@ model = dict(
             gaussian_overlap=0.1,
             max_objs=500,
             min_radius=2,
-            # KL has NO velocity → zero out vel loss weights
+            # Single-frame camera input: vel head has no temporal cue to
+            # learn from, even though KL pkl now carries real velocities.
+            # See bevfusion_lidar_kl_base.py for full rationale.
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]),
         test_cfg=dict(
             post_center_limit_range=[-55.0, -55.0, -10.0, 55.0, 55.0, 10.0],

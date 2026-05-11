@@ -50,7 +50,8 @@ class Pack3DDetInputs(BaseTransform):
     INPUTS_KEYS = ['points', 'img']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d',
-        'gt_forecasting_locs', 'gt_forecasting_mask',
+        'gt_forecasting_locs', 'gt_forecasting_mask', 'gt_track_ids_3d',
+        'gt_language_target_mask',
     ]
     INSTANCEDATA_2D_KEYS = [
         'gt_bboxes',
@@ -59,7 +60,7 @@ class Pack3DDetInputs(BaseTransform):
 
     SEG_KEYS = [
         'gt_seg_map', 'pts_instance_mask', 'pts_semantic_mask',
-        'gt_semantic_seg'
+        'gt_semantic_seg', 'gt_occ'
     ]
 
     def __init__(
@@ -77,7 +78,7 @@ class Pack3DDetInputs(BaseTransform):
                             'cam2global', 'crop_offset', 'img_crop_offset',
                             'resize_img_shape', 'lidar2cam', 'ori_lidar2img',
                             'num_ref_frames', 'num_views', 'ego2global',
-                            'axis_align_matrix')
+                            'axis_align_matrix', 'gt_occ_meta')
     ) -> None:
         self.keys = keys
         self.meta_keys = meta_keys
@@ -174,7 +175,8 @@ class Pack3DDetInputs(BaseTransform):
                 'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
                 'gt_bboxes_labels', 'attr_labels', 'pts_instance_mask',
                 'pts_semantic_mask', 'centers_2d', 'depths', 'gt_labels_3d',
-                'gt_forecasting_locs', 'gt_forecasting_mask',
+                'gt_forecasting_locs', 'gt_forecasting_mask', 'gt_occ',
+                'gt_language_target_mask',
         ]:
             if key not in results:
                 continue

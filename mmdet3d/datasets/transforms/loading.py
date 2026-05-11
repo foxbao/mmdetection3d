@@ -879,6 +879,8 @@ class LoadAnnotations3D(LoadAnnotations):
         for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
             if key in results['ann_info']:
                 results[key] = results['ann_info'][key]
+        if 'track_id' in results['ann_info']:
+            results['gt_track_ids_3d'] = results['ann_info']['track_id']
         return results
 
     def _load_bboxes_depth(self, results: dict) -> dict:

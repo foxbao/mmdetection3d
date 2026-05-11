@@ -120,7 +120,12 @@ model = dict(
             gaussian_overlap=0.1,
             min_radius=2,
             pos_weight=-1,
-            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
+            # KL pkl now carries real velocities, but the input is single-frame
+            # (no LoadPointsFromMultiSweeps, no Δt channel) so the vel head has
+            # no temporal cue to learn from. Zeroing the last two weights stops
+            # vel loss from leaking into the shared backbone via class-prior
+            # gradients. Restore to 0.2 if/when multi-sweep loading is added.
+            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
             pi_symmetric_class_indices=[2, 6, 14],  # IGV-Full, IGV-Empty, WheelCrane
             assigner=dict(
                 type='HungarianAssigner3D',

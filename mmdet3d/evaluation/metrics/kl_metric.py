@@ -422,14 +422,24 @@ class KlDevKit:
 
         return eval_boxes
 
-def load_gt(klDevKit: KlDevKit, eval_split: str, box_cls):
+def load_gt(klDevKit: KlDevKit,
+            eval_split: str,
+            box_cls,
+            sample_tokens: Optional[Sequence[str]] = None):
     if eval_split not in ['train', 'val']:
         raise ValueError(f"Invalid eval_split: {eval_split}")
-    
+
+    sample_token_set = None
+    if sample_tokens is not None:
+        sample_token_set = set(sample_tokens)
+
     data_list = klDevKit.data['data_list']
     all_annotations = EvalBoxes()
     for sample in tqdm.tqdm(data_list):
         sample_token = sample['token']
+        if (sample_token_set is not None
+                and sample_token not in sample_token_set):
+            continue
         sample_boxes = []
         for box in sample['instances']:
             box['sample_token'] = sample_token
@@ -562,10 +572,15 @@ class KlDetectionEval:
             print('Initializing nuScenes detection evaluation')
         self.pred_boxes, self.meta = load_prediction(self.result_path, self.cfg.max_boxes_per_sample, KlDetectionBox,
                                                      verbose=verbose)
-        self.gt_boxes = load_gt(self.klDevKit, self.eval_set, KlDetectionBox)
+        pred_sample_tokens = self.pred_boxes.sample_tokens
+        self.gt_boxes = load_gt(
+            self.klDevKit,
+            self.eval_set,
+            KlDetectionBox,
+            sample_tokens=pred_sample_tokens)
 
-        assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
-            "Samples in split doesn't match samples in predictions."
+        assert set(pred_sample_tokens) == set(self.gt_boxes.sample_tokens), \
+            "Samples in predictions don't match samples in ground truth."
 
 
         # Filter boxes (distance, points per box, etc.).

@@ -15,7 +15,7 @@ overwrite the existing pkl.
 """
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import mmengine
@@ -51,10 +51,21 @@ def _global_vel_to_lidar_xy(info: dict, vel_global: np.ndarray,
 
 
 def _build_track_records(infos: list, lidar2ego: np.ndarray) -> dict:
-    """Collect sortable records grouped by (scene_token, track_id)."""
+    """Collect sortable records grouped by (scene_token, track_id).
+
+    ``scene_token`` MUST be present and non-empty on every frame. Without
+    it, the (scene, track_id) compound key collapses and same-track_id
+    boxes from different scenes merge — KL pkl reuses ~93% of track_ids
+    across scenes, so a silent fallback would produce garbage velocities
+    spanning unrelated trajectories.
+    """
     tracks = defaultdict(list)
     for frame_idx, info in enumerate(infos):
-        scene = info.get('scene_token', '')
+        scene = info.get('scene_token')
+        if not scene:
+            raise ValueError(
+                f'frame {frame_idx} (sample_idx={info.get("sample_idx")}) '
+                f'has missing/empty scene_token; cannot safely group tracks.')
         timestamp = float(info.get('timestamp', 0.0))
         for inst_idx, inst in enumerate(info.get('instances', [])):
             track_id = inst.get('track_id', -1)
@@ -66,6 +77,7 @@ def _build_track_records(infos: list, lidar2ego: np.ndarray) -> dict:
                 'inst_idx': inst_idx,
                 'timestamp': timestamp,
                 'center_global': center_global,
+                'bbox_label': int(inst.get('bbox_label_3d', -1)),
             })
 
     for records in tracks.values():
@@ -73,63 +85,101 @@ def _build_track_records(infos: list, lidar2ego: np.ndarray) -> dict:
     return tracks
 
 
+def _segment_records(records: list, max_time_diff: float) -> list:
+    """Split a time-sorted track into sub-segments at any internal gap
+    larger than ``max_time_diff``.
+
+    Two scene-level data quirks make this necessary:
+      * KL annotates at variable FPS (mostly 2 Hz, sometimes 1/5 Hz) and
+        skips intervals where nothing moves — so two adjacent records in
+        the same ``(scene, track_id)`` may legitimately be 5+ seconds
+        apart, and differencing across that gap is meaningless.
+      * If track_ids are reused across un-annotated stationary intervals,
+        sorting+diffing across the gap mixes two unrelated trajectories.
+
+    Splitting at ``> max_time_diff`` matches the same trust-window the
+    one-sided guards use, so within a sub-segment every adjacent dt is
+    safe and centered diff has both sides bounded by construction.
+    """
+    if not records:
+        return []
+    segments = [[records[0]]]
+    for r in records[1:]:
+        if r['timestamp'] - segments[-1][-1]['timestamp'] > max_time_diff:
+            segments.append([r])
+        else:
+            segments[-1].append(r)
+    return segments
+
+
 def _estimate_track_velocities(tracks: dict, min_dt: float,
                                max_time_diff: float,
                                max_speed: float) -> tuple:
-    """Estimate global velocity for each frame/instance occurrence."""
+    """Estimate global velocity for each frame/instance occurrence.
+
+    Tries strategies in order — centered diff (when both neighbours exist),
+    forward, then backward — and takes the first one whose ``dt`` and
+    speed pass the guards. Earlier this function used a hard if/elif: a
+    centered attempt rejected by ``max_time_diff`` would skip the record
+    entirely, even when one of the two neighbours was perfectly close.
+
+    Each track is first cut at internal gaps via ``_segment_records`` so
+    sub-segments span only contiguous-FPS observation windows.
+    """
     velocities = {}
     valid_count = 0
     rejected_time = 0
     rejected_speed = 0
     singletons = 0
+    rejected_by_label: Counter = Counter()
 
-    for records in tracks.values():
-        if len(records) < 2:
-            singletons += len(records)
-            continue
-
-        for i, rec in enumerate(records):
-            prev_rec = records[i - 1] if i > 0 else None
-            next_rec = records[i + 1] if i + 1 < len(records) else None
-
-            if prev_rec is not None and next_rec is not None:
-                p0 = prev_rec['center_global']
-                p1 = next_rec['center_global']
-                t0 = prev_rec['timestamp']
-                t1 = next_rec['timestamp']
-                allowed_dt = 2.0 * max_time_diff
-            elif next_rec is not None:
-                p0 = rec['center_global']
-                p1 = next_rec['center_global']
-                t0 = rec['timestamp']
-                t1 = next_rec['timestamp']
-                allowed_dt = max_time_diff
-            else:
-                p0 = prev_rec['center_global']
-                p1 = rec['center_global']
-                t0 = prev_rec['timestamp']
-                t1 = rec['timestamp']
-                allowed_dt = max_time_diff
-
-            dt = float(t1 - t0)
-            if dt <= min_dt:
-                rejected_time += 1
+    for track_records in tracks.values():
+        for records in _segment_records(track_records, max_time_diff):
+            if len(records) < 2:
+                singletons += len(records)
+                for rec in records:
+                    rejected_by_label[rec['bbox_label']] += 1
                 continue
-            if dt > allowed_dt:
-                rejected_time += 1
-                continue
+            for i, rec in enumerate(records):
+                prev_rec = records[i - 1] if i > 0 else None
+                next_rec = records[i + 1] if i + 1 < len(records) else None
 
-            vel_global = (p1 - p0) / dt
-            speed = float(np.linalg.norm(vel_global[:2]))
-            if speed > max_speed:
-                rejected_speed += 1
-                continue
+                strategies = []
+                if prev_rec is not None and next_rec is not None:
+                    strategies.append(
+                        (prev_rec, next_rec, 2.0 * max_time_diff))
+                if next_rec is not None:
+                    strategies.append((rec, next_rec, max_time_diff))
+                if prev_rec is not None:
+                    strategies.append((prev_rec, rec, max_time_diff))
 
-            key = (rec['frame_idx'], rec['inst_idx'])
-            velocities[key] = vel_global
-            valid_count += 1
+                vel_global = None
+                saw_dt_ok = False
+                for r0, r1, allowed_dt in strategies:
+                    dt = float(r1['timestamp'] - r0['timestamp'])
+                    if dt <= min_dt or dt > allowed_dt:
+                        continue
+                    saw_dt_ok = True
+                    v = (r1['center_global'] - r0['center_global']) / dt
+                    if float(np.linalg.norm(v[:2])) > max_speed:
+                        continue
+                    vel_global = v
+                    break
 
-    return velocities, valid_count, rejected_time, rejected_speed, singletons
+                if vel_global is None:
+                    if saw_dt_ok:
+                        rejected_speed += 1
+                    else:
+                        rejected_time += 1
+                    rejected_by_label[rec['bbox_label']] += 1
+                    continue
+
+                key = (rec['frame_idx'], rec['inst_idx'])
+                velocities[key] = vel_global
+                valid_count += 1
+
+    return (velocities, valid_count, rejected_time, rejected_speed,
+            singletons, rejected_by_label)
 
 
 def add_velocity_to_pkl(pkl_path: str,
@@ -160,10 +210,19 @@ def add_velocity_to_pkl(pkl_path: str,
     tracks = _build_track_records(infos, lidar2ego)
     print(f'Tracks with valid track_id: {len(tracks)}')
 
-    velocities, valid_count, rejected_time, rejected_speed, singletons = (
-        _estimate_track_velocities(tracks, min_dt=min_dt,
-                                   max_time_diff=max_time_diff,
-                                   max_speed=max_speed))
+    (velocities, valid_count, rejected_time, rejected_speed, singletons,
+     rejected_by_label) = _estimate_track_velocities(
+        tracks, min_dt=min_dt, max_time_diff=max_time_diff,
+        max_speed=max_speed)
+    metainfo = data.get('metainfo', {})
+    # KL pkl stores ``categories: {name: idx}``; older formats use ``classes: [names]``.
+    # Build a ``label_to_name`` dict that handles both.
+    label_to_name = {}
+    if isinstance(metainfo.get('categories'), dict):
+        label_to_name = {int(idx): name
+                         for name, idx in metainfo['categories'].items()}
+    elif isinstance(metainfo.get('classes'), (list, tuple)):
+        label_to_name = {i: name for i, name in enumerate(metainfo['classes'])}
 
     total_instances = 0
     zero_count = 0
@@ -190,6 +249,11 @@ def add_velocity_to_pkl(pkl_path: str,
     print(f'Rejected by time guard (>{max_time_diff:g}s one-sided, '
           f'>{2 * max_time_diff:g}s centered): {rejected_time}')
     print(f'Rejected by speed guard (>{max_speed:g} m/s): {rejected_speed}')
+    if rejected_by_label:
+        print('Zero-fallback breakdown by class label:')
+        for label in sorted(rejected_by_label):
+            name = label_to_name.get(label, f'<label {label}>')
+            print(f'  {name:25s} {rejected_by_label[label]}')
     if speeds:
         arr = np.asarray(speeds, dtype=np.float64)
         print('Speed stats m/s: '

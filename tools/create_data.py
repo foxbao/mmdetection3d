@@ -141,16 +141,24 @@ def kl_data_prep(root_path,
         print('[KL] forecast_cfg.enable=False, skip forecasting trajectory '
               'generation')
 
-    # Add nuScenes-style object velocities from track_id trajectories.  Keep the
-    # original pkl names untouched and write explicit velocity variants so
-    # configs can opt in without changing other KL experiments.
-    from tools.dataset_converters.add_velocity import add_velocity_to_pkl
-    info_train_vel_path = osp.join(
-        out_dir, f'{info_prefix}_infos_train_with_velocity.pkl')
-    info_val_vel_path = osp.join(
-        out_dir, f'{info_prefix}_infos_val_with_velocity.pkl')
-    add_velocity_to_pkl(info_train_path, out_path=info_train_vel_path)
-    add_velocity_to_pkl(info_val_path, out_path=info_val_vel_path)
+    # Add nuScenes-style object velocities from track_id centered differences,
+    # written in place to ``instance['velocity']``. Default ON; gated by
+    # ``velocity_cfg.enable`` so detection-only sanity runs can skip it.
+    velocity_cfg = {}
+    if cfg is not None and hasattr(cfg, 'velocity_cfg'):
+        velocity_cfg = dict(cfg.velocity_cfg)
+    velocity_enabled = bool(velocity_cfg.get('enable', True))
+    if velocity_enabled:
+        from tools.dataset_converters.add_velocity import add_velocity_to_pkl
+        kw = dict(
+            min_dt=float(velocity_cfg.get('min_dt', 1e-3)),
+            max_time_diff=float(velocity_cfg.get('max_time_diff', 1.5)),
+            max_speed=float(velocity_cfg.get('max_speed', 60.0)))
+        add_velocity_to_pkl(info_train_path, in_place=True, **kw)
+        add_velocity_to_pkl(info_val_path, in_place=True, **kw)
+    else:
+        print('[KL] velocity_cfg.enable=False, skip per-instance velocity '
+              'estimation; instance["velocity"] stays as [0.0, 0.0]')
 
     create_groundtruth_database(dataset_name, root_path, info_prefix,
                                 f'{info_prefix}_infos_train.pkl')

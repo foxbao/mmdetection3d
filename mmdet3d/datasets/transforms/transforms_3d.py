@@ -446,6 +446,11 @@ class ObjectSample(BaseTransform):
                 fm = input_dict['gt_forecasting_mask']
                 pad = np.zeros((n_sampled,) + fm.shape[1:], dtype=fm.dtype)
                 input_dict['gt_forecasting_mask'] = np.concatenate([fm, pad])
+            if 'gt_track_ids_3d' in input_dict:
+                track_ids = input_dict['gt_track_ids_3d']
+                pad = np.full((n_sampled, ), -1, dtype=track_ids.dtype)
+                input_dict['gt_track_ids_3d'] = np.concatenate(
+                    [track_ids, pad])
 
             points = self.remove_points_in_boxes(points, sampled_gt_bboxes_3d)
             # check the points dimension
@@ -910,7 +915,9 @@ class ObjectRangeFilter(BaseTransform):
         input_dict['gt_labels_3d'] = gt_labels_3d
 
         np_mask = mask.numpy().astype(bool)
-        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+        for key in (
+                'gt_forecasting_locs', 'gt_forecasting_mask',
+                'gt_track_ids_3d'):
             if key in input_dict:
                 input_dict[key] = input_dict[key][np_mask]
 
@@ -1014,7 +1021,9 @@ class ObjectNameFilter(BaseTransform):
         input_dict['gt_bboxes_3d'] = input_dict['gt_bboxes_3d'][gt_bboxes_mask]
         input_dict['gt_labels_3d'] = input_dict['gt_labels_3d'][gt_bboxes_mask]
 
-        for key in ('gt_forecasting_locs', 'gt_forecasting_mask'):
+        for key in (
+                'gt_forecasting_locs', 'gt_forecasting_mask',
+                'gt_track_ids_3d'):
             if key in input_dict:
                 input_dict[key] = input_dict[key][gt_bboxes_mask]
 

@@ -1,159 +1,53 @@
-# 专利附图（Mermaid 草稿）
+# 专利技术交底书附图说明
 
-> 用 Typora 或支持 Mermaid 的编辑器打开即可预览
+当前 Word 技术交底书中使用的是图片附图，不再使用 Mermaid 自动排版图。其中补充图A为港口方向对称目标结构示例图；图1至图5为黑白线框流程图或原理图，由 `tools/render_patent_flowcharts.py` 按固定坐标生成；图6为点云鸟瞰对比图，由 `tools/find_orientation_contrast_frames.py` 生成后整理为黑白线型标注版本。渲染结果位于 `docs/patent_figures_generated/`，结构示例图位于 `docs/scene_image/`。
 
----
+## 补充图A：方向对称目标结构示例图
+
+文件：
+
+- `docs/scene_image/IGV_1024_cropped.jpg`
+- `docs/scene_image/WheelCrane_1024.jpg`
+
+展示智能引导车（IGV）和轮胎吊（WheelCrane）的结构对称性示例，用于说明该类港口作业目标在单帧外观或 BEV 感知结果中前后差异较弱。
 
 ## 图1：整体流程示意图
 
-```mermaid
-flowchart TB
-    subgraph S1["S1: 目标类别分类"]
-        CLS["港口检测目标"] --> DEF["方向确定类<br/>集卡/拖车/叉车/小汽车/行人..."]
-        CLS --> SYM["方向对称类<br/>IGV / 轮胎吊"]
-    end
+文件：`docs/patent_figures_generated/fig1_overall_flow.png`
 
-    subgraph S2["S2: 训练阶段 — π 周期旋转损失"]
-        INPUT_T["标注数据<br/>(含 180° 歧义)"] --> ENCODE["sin/cos 旋转编码"]
-        ENCODE --> JUDGE{"属于方向对称类?"}
-        JUDGE -- 否 --> NORMAL["常规 L1 损失"]
-        JUDGE -- 是 --> COMPARE["比较 d_orig 与 d_flip"]
-        COMPARE --> FLIP{"d_flip < d_orig ?"}
-        FLIP -- 是 --> DO_FLIP["翻转真值:<br/>(sin_gt, cos_gt) → (-sin_gt, -cos_gt)"]
-        FLIP -- 否 --> KEEP["保持原始真值"]
-        DO_FLIP --> LOSS["计算 L1 损失"]
-        KEEP --> LOSS
-        NORMAL --> LOSS
-    end
+展示目标类别划分、训练阶段 `π` 周期旋转损失、推理阶段等价方向对齐、时序朝向稳定化以及最终几何一致化输出之间的关系。
 
-    subgraph S3["S3: 推理后处理 — 时序朝向异常检测"]
-        DET["模型推理输出"] --> HIST["维护历史状态队列<br/>(最近 N 帧)"]
-        HIST --> CLUSTER["朝向角度聚类<br/>确定稳定基准 θ_stable"]
-        CLUSTER --> ANOMALY{"朝向异常?<br/>Δθ > τ 或 Δθ > k·max变化"}
-        ANOMALY -- 异常 --> REPLACE["使用历史稳定朝向替代"]
-        ANOMALY -- 正常 --> ACCEPT["接受当前朝向"]
-        REPLACE --> OUTPUT["输出最终朝向"]
-        ACCEPT --> OUTPUT
-    end
+## 图2：`π` 周期旋转损失原理示意图
 
-    S1 --> S2
-    S2 --> S3
-```
+文件：`docs/patent_figures_generated/fig2_pi_loss.png`
 
----
+展示方向确定类目标采用常规唯一朝向监督，方向对称类目标在原始真值编码和 `π` 翻转等价编码之间选择更接近预测的编码作为监督目标。
 
-## 图2：π 周期旋转损失原理示意图
+## 图3：训练阶段目标编码翻转流程图
 
-```mermaid
-flowchart LR
-    subgraph CASE_A["方向确定类 (如集卡)"]
-        direction TB
-        A_PRED["预测: θ_pred"] --> A_LOSS["L1 损失<br/>|sin_pred - sin_gt| + |cos_pred - cos_gt|"]
-        A_GT["真值: θ_gt"] --> A_LOSS
-    end
+文件：`docs/patent_figures_generated/fig3_training_flip.png`
 
-    subgraph CASE_B["方向对称类 (如 IGV)"]
-        direction TB
-        B_PRED["预测: θ_pred"] --> B_D1["d_orig = |sin_pred - sin_gt|<br/>+ |cos_pred - cos_gt|"]
-        B_GT["真值: θ_gt"] --> B_D1
-        B_PRED --> B_D2["d_flip = |sin_pred + sin_gt|<br/>+ |cos_pred + cos_gt|"]
-        B_GT --> B_D2
-        B_D1 --> B_MIN["取 min(d_orig, d_flip)<br/>作为损失"]
-        B_D2 --> B_MIN
-    end
-```
+展示根据目标类别判断是否启用 `π` 周期处理，并根据 `d_orig` 与 `d_flip` 的比较结果选择旋转监督目标。
 
-```mermaid
-flowchart TB
-    subgraph UNIT_CIRCLE["单位圆上的等价性示意"]
-        direction LR
-        THETA["θ_gt = 0°<br/>(sin=0, cos=1)"]
-        THETA_PI["θ_gt + π = 180°<br/>(sin=0, cos=-1)"]
-        EQ["对方向对称类:<br/>两者描述同一物理状态"]
-        THETA --- EQ
-        THETA_PI --- EQ
-    end
+## 图4：时序朝向异常检测流程图
 
-    subgraph GRADIENT["梯度方向对比"]
-        direction TB
-        BEFORE["改进前: 梯度冲突"] --> G1["GT=0° 时: 梯度 → cos=+1"]
-        BEFORE --> G2["GT=180° 时: 梯度 → cos=-1"]
-        G1 --> CONFLICT["方向相反, 无法收敛 ✗"]
-        G2 --> CONFLICT
+文件：`docs/patent_figures_generated/fig4_temporal_anomaly.png`
 
-        AFTER["改进后: 梯度一致"] --> G3["GT=0° → 保持, 梯度 → cos=+1"]
-        AFTER --> G4["GT=180° → 翻转为0°, 梯度 → cos=+1"]
-        G3 --> CONVERGE["方向一致, 稳定收敛 ✓"]
-        G4 --> CONVERGE
-    end
-```
+展示推理阶段对方向对称目标维护历史状态队列、进行等价方向对齐、聚类确定稳定基准、判定异常跳变、修正或平滑朝向，并同步更新方向向量和三维框的流程。
 
----
+## 图5：朝向角度聚类示意图
 
-## 图3：时序朝向异常检测工作流程图
+文件：`docs/patent_figures_generated/fig5_orientation_cluster.png`
 
-```mermaid
-flowchart TB
-    START["接收新检测帧"] --> VALID{"检测有效?"}
-    VALID -- 否 --> REJECT["丢弃"]
-    VALID -- 是 --> EXTRACT["提取历史 N 帧朝向角"]
-    EXTRACT --> STATIC{"目标主要静止?<br/>(80%帧速度 < 0.1m/s)"}
-    STATIC -- 否 --> ACCEPT_DIRECT["直接接受新检测朝向"]
-    STATIC -- 是 --> CLUSTER["对历史朝向进行聚类"]
-    CLUSTER --> FIND_MAX["选取最大簇<br/>中心 = θ_cluster"]
-    FIND_MAX --> CHECK_SHIFT{"聚类中心偏移?<br/>|θ_cluster - θ_stable| > ε"}
-    CHECK_SHIFT -- 是 --> COUNT["统计最近 M 帧<br/>偏离稳定基准的帧数"]
-    CHECK_SHIFT -- 否 --> USE_STABLE["使用当前 θ_stable"]
-    COUNT --> MAJORITY{"> 50% 偏离?"}
-    MAJORITY -- 是 --> UPDATE["更新: θ_stable ← θ_cluster"]
-    MAJORITY -- 否 --> USE_STABLE
-    UPDATE --> CALC_DIFF["计算 Δθ = |θ_new - θ_stable|"]
-    USE_STABLE --> CALC_DIFF
-    CALC_DIFF --> ANOMALY{"Δθ > τ 或<br/>Δθ > k · max历史变化?"}
-    ANOMALY -- 异常 --> REPLACE["输出 θ_stable 替代"]
-    ANOMALY -- 正常 --> SMOOTH["移动平均平滑后输出"]
-    REPLACE --> END_NODE["输出最终朝向"]
-    SMOOTH --> END_NODE
-    ACCEPT_DIRECT --> END_NODE
-```
+展示历史朝向中可能出现的两个相差约 `180°` 的角度簇，以及选取主簇作为稳定朝向基准的过程。
 
----
+## 图6：单帧朝向可视化对比图组
 
-## 图4：朝向角度聚类示意图
+文件：
 
-```mermaid
-flowchart TB
-    subgraph INPUT["输入: 历史 N 帧朝向角"]
-        H["θ₁=30° θ₂=31° θ₃=29° θ₄=210° θ₅=30° θ₆=32° θ₇=31° θ₈=209° θ₉=30° θ₁₀=31°"]
-    end
+- `docs/patent_figures_generated/fig6_1_igv_empty.png`
+- `docs/patent_figures_generated/fig6_2_igv_empty.png`
+- `docs/patent_figures_generated/fig6_3_wheelcrane.png`
+- `docs/patent_figures_generated/fig6_4_wheelcrane.png`
 
-    INPUT --> STEP1["遍历每个角度"]
-    STEP1 --> CHECK{"与已有簇中心<br/>角度差 < ε (3°) ?"}
-    CHECK -- 是 --> MERGE["归入该簇, 更新簇中心:<br/>θ = atan2(Σsin, Σcos)"]
-    CHECK -- 否 --> NEW["创建新簇"]
-
-    MERGE --> RESULT
-    NEW --> RESULT
-
-    subgraph RESULT["聚类结果"]
-        C1["簇1: {30°,31°,29°,30°,32°,31°,30°,31°}<br/>中心=30.5°, 样本数=8 ← 主簇 ✓"]
-        C2["簇2: {210°,209°}<br/>中心=209.5°, 样本数=2"]
-    end
-
-    RESULT --> SELECT["选取样本数最多的簇"]
-    SELECT --> STABLE["稳定朝向基准 θ_stable = 30.5°"]
-```
-
----
-
-## 图5：实验对比（表格形式，需转为柱状图）
-
-| 类别 | 改进前 AOE (rad) | 改进后 AOE (rad) | 降幅 |
-|------|:---:|:---:|:---:|
-| IGV-Full | 0.650 | < 0.20 | > 69% |
-| IGV-Empty | 0.673 | < 0.20 | > 70% |
-| WheelCrane | 1.105 | < 0.30 | > 73% |
-| Car (参考) | 0.045 | 0.045 | - |
-| Truck (参考) | 0.026 | 0.026 | - |
-
-> 注: 改进后数据待训练完成后填入真实值
+展示 IGV-Empty（空载智能引导车）和 WheelCrane（轮胎吊）单帧点云鸟瞰图中的对照方案预测框、本发明方案预测框和真值框对比。图中 `GT` 表示真值框，`A` 表示对照方案预测框，`B` 表示本发明方案预测框，三者采用不同线型和标号区分。

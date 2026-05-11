@@ -73,6 +73,76 @@ def _limit_max_per_img(bboxes, scores: Tensor, labels: Tensor,
     return bboxes[topk_inds], scores[topk_inds], labels[topk_inds]
 
 
+def _expand_pi_symmetric_class_indices(
+        pi_symmetric_class_indices,
+        class_names: List[List[str]]) -> List[List[int]]:
+    """Normalize pi-symmetric class config into task-local class indices.
+
+    The config may be omitted, provided as a single flat list of global class
+    indices, or as one explicit local-index list per task.
+    """
+    num_tasks = len(class_names)
+    if not pi_symmetric_class_indices:
+        return [[] for _ in range(num_tasks)]
+
+    if isinstance(pi_symmetric_class_indices[0], (list, tuple)):
+        assert len(pi_symmetric_class_indices) == num_tasks, \
+            'Nested pi_symmetric_class_indices should provide one list per task.'
+        return [[int(cls_idx) for cls_idx in task_indices]
+                for task_indices in pi_symmetric_class_indices]
+
+    flat_indices = [int(cls_idx) for cls_idx in pi_symmetric_class_indices]
+    task_local_indices: List[List[int]] = []
+    offset = 0
+    for task_class_names in class_names:
+        task_size = len(task_class_names)
+        task_local_indices.append([
+            cls_idx - offset for cls_idx in flat_indices
+            if offset <= cls_idx < offset + task_size
+        ])
+        offset += task_size
+    return task_local_indices
+
+
+def _adjust_pi_symmetric_rotation_targets(
+        preds: Tensor,
+        bbox_targets: Tensor,
+        labels: Tensor,
+        pi_symmetric_class_indices: List[int]) -> Tensor:
+    """Flip yaw targets by pi for front-back symmetric classes when helpful.
+
+    Rotation is encoded as ``[sin(theta), cos(theta)]`` at channels 6 and 7.
+    For pi-symmetric classes, ``theta`` and ``theta + pi`` are physically
+    equivalent, so we choose the target branch that is closer to the current
+    prediction to avoid contradictory gradients from ambiguous yaw labels.
+    """
+    if not pi_symmetric_class_indices:
+        return bbox_targets
+
+    sym_mask = torch.zeros_like(labels, dtype=torch.bool)
+    for cls_idx in pi_symmetric_class_indices:
+        sym_mask |= (labels == cls_idx)
+    if not sym_mask.any():
+        return bbox_targets
+
+    pred_sin = preds[..., 6].detach()
+    pred_cos = preds[..., 7].detach()
+    gt_sin = bbox_targets[..., 6]
+    gt_cos = bbox_targets[..., 7]
+    dist_orig = (pred_sin - gt_sin).abs() + (pred_cos - gt_cos).abs()
+    dist_flip = (pred_sin + gt_sin).abs() + (pred_cos + gt_cos).abs()
+    flip_mask = sym_mask & (dist_flip < dist_orig)
+    if not flip_mask.any():
+        return bbox_targets
+
+    bbox_targets = bbox_targets.clone()
+    bbox_targets[..., 6] = torch.where(flip_mask, -bbox_targets[..., 6],
+                                       bbox_targets[..., 6])
+    bbox_targets[..., 7] = torch.where(flip_mask, -bbox_targets[..., 7],
+                                       bbox_targets[..., 7])
+    return bbox_targets
+
+
 @MODELS.register_module()
 class SeparateHead(BaseModule):
     """SeparateHead for CenterHead.
@@ -483,8 +553,10 @@ class CenterHead(BaseModule):
                     position of the valid boxes.
                 - list[torch.Tensor]: Masks indicating which
                     boxes are valid.
+                - list[torch.Tensor]: Task-local class labels for
+                    valid boxes, padded with ``-1``.
         """
-        heatmaps, anno_boxes, inds, masks = multi_apply(
+        heatmaps, anno_boxes, inds, masks, task_labels = multi_apply(
             self.get_targets_single, batch_gt_instances_3d)
         # Transpose heatmaps
         heatmaps = list(map(list, zip(*heatmaps)))
@@ -498,7 +570,10 @@ class CenterHead(BaseModule):
         # Transpose inds
         masks = list(map(list, zip(*masks)))
         masks = [torch.stack(masks_) for masks_ in masks]
-        return heatmaps, anno_boxes, inds, masks
+        # Transpose task labels
+        task_labels = list(map(list, zip(*task_labels)))
+        task_labels = [torch.stack(labels_) for labels_ in task_labels]
+        return heatmaps, anno_boxes, inds, masks, task_labels
 
     def get_targets_single(self,
                            gt_instances_3d: InstanceData) -> Tuple[Tensor]:
@@ -560,7 +635,7 @@ class CenterHead(BaseModule):
             task_classes.append(torch.cat(task_class).long().to(device))
             flag2 += len(mask)
         draw_gaussian = draw_heatmap_gaussian
-        heatmaps, anno_boxes, inds, masks = [], [], [], []
+        heatmaps, anno_boxes, inds, masks, task_labels_list = [], [], [], [], []
 
         for idx, task_head in enumerate(self.task_heads):
             heatmap = gt_bboxes_3d.new_zeros(
@@ -572,6 +647,8 @@ class CenterHead(BaseModule):
 
             ind = gt_labels_3d.new_zeros((max_objs), dtype=torch.int64)
             mask = gt_bboxes_3d.new_zeros((max_objs), dtype=torch.uint8)
+            task_labels = gt_labels_3d.new_full((max_objs,), -1,
+                                                dtype=torch.long)
 
             num_objs = min(task_boxes[idx].shape[0], max_objs)
 
@@ -624,6 +701,7 @@ class CenterHead(BaseModule):
 
                     ind[new_idx] = y * feature_map_size[0] + x
                     mask[new_idx] = 1
+                    task_labels[new_idx] = cls_id
                     # TODO: support other outdoor dataset
                     vx, vy = task_boxes[idx][k][7:]
                     rot = task_boxes[idx][k][6]
@@ -643,7 +721,8 @@ class CenterHead(BaseModule):
             anno_boxes.append(anno_box)
             masks.append(mask)
             inds.append(ind)
-        return heatmaps, anno_boxes, inds, masks
+            task_labels_list.append(task_labels)
+        return heatmaps, anno_boxes, inds, masks, task_labels_list
 
     def loss(self, pts_feats: List[Tensor],
              batch_data_samples: List[Det3DDataSample], *args,
@@ -684,9 +763,12 @@ class CenterHead(BaseModule):
             dict[str,torch.Tensor]: Loss of heatmap and bbox of each task.
         """
 
-        heatmaps, anno_boxes, inds, masks = self.get_targets(
+        heatmaps, anno_boxes, inds, masks, task_labels = self.get_targets(
             batch_gt_instances_3d)
         loss_dict = dict()
+        pi_sym_indices = _expand_pi_symmetric_class_indices(
+            self.train_cfg.get('pi_symmetric_class_indices', []),
+            self.class_names)
         for task_id, preds_dict in enumerate(preds_dicts):
             # heatmap focal loss
             preds_dict[0]['heatmap'] = clip_sigmoid(preds_dict[0]['heatmap'])
@@ -715,6 +797,9 @@ class CenterHead(BaseModule):
 
             code_weights = self.train_cfg.get('code_weights', None)
             bbox_weights = mask * mask.new_tensor(code_weights)
+            target_box = _adjust_pi_symmetric_rotation_targets(
+                pred, target_box, task_labels[task_id],
+                pi_sym_indices[task_id])
             loss_bbox = self.loss_bbox(
                 pred, target_box, bbox_weights, avg_factor=(num + 1e-4))
             loss_dict[f'task{task_id}.loss_heatmap'] = loss_heatmap

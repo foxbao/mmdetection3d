@@ -32,9 +32,10 @@ temporal warp is silently misaligned by exactly the per-frame aug rotation.
 from __future__ import annotations
 
 import copy
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
+from mmengine.dataset import Compose, force_full_init
 
 from mmdet3d.datasets.kl_dataset import KlDataset
 from mmdet3d.registry import DATASETS
@@ -47,12 +48,17 @@ class KlBEVFormerDataset(KlDataset):
                  *args,
                  queue_length: int = 4,
                  max_time_gap: float = 1.0,
+                 post_pipeline: Optional[List[Union[dict, Callable]]] = None,
                  **kwargs) -> None:
         assert queue_length >= 1, f'queue_length must be >=1, got {queue_length}'
         assert max_time_gap > 0, f'max_time_gap must be >0, got {max_time_gap}'
         self.queue_length = queue_length
         self.max_time_gap = float(max_time_gap)
+        self.post_pipeline = (
+            Compose(post_pipeline) if post_pipeline is not None else None)
         self.token2index: Dict[str, int] = {}
+        self.valid_data_indices: Optional[List[int]] = None
+        self.raw_data_len = 0
         super().__init__(*args, **kwargs)
 
     def full_init(self) -> None:
@@ -60,27 +66,57 @@ class KlBEVFormerDataset(KlDataset):
         if self._fully_initialized:
             return
         super().full_init()
+        self.raw_data_len = len(self.data_address) if self.serialize_data else \
+            len(self.data_list)
         self.token2index = {}
-        for idx in range(len(self)):
-            info = self.get_data_info(idx)
+        for idx in range(self.raw_data_len):
+            info = self._get_raw_data_info(idx)
             token = info.get('token')
             if token:
                 self.token2index[token] = idx
+        if self.test_mode:
+            self.valid_data_indices = [
+                idx for idx in range(self.raw_data_len)
+                if self._collect_queue_indices(idx) is not None
+            ]
+        else:
+            self.valid_data_indices = None
+
+    @force_full_init
+    def __len__(self) -> int:
+        if self.valid_data_indices is not None:
+            return len(self.valid_data_indices)
+        return self.raw_data_len
+
+    @force_full_init
+    def get_data_info(self, idx: int) -> dict:
+        return self._get_raw_data_info(self._to_raw_index(idx))
+
+    def _to_raw_index(self, idx: int) -> int:
+        if self.valid_data_indices is None:
+            return idx
+        if idx < 0:
+            idx += len(self.valid_data_indices)
+        return self.valid_data_indices[idx]
+
+    def _get_raw_data_info(self, idx: int) -> dict:
+        return super().get_data_info(idx)
 
     def prepare_data(self, index: int) -> Optional[dict]:
         """Assemble a queue of ``queue_length`` frames ending at ``index``."""
-        indices = self._collect_queue_indices(index)
+        indices = self._collect_queue_indices(self._to_raw_index(index))
         if indices is None:
             return None
 
         queue: List[dict] = []
         raw_meta: List[dict] = []
-        for i in indices:
-            raw = self.get_data_info(i)
+        for queue_idx, i in enumerate(indices):
+            raw = self._get_raw_data_info(i)
             if raw is None:
                 return None
             raw_meta.append(self._extract_raw_meta(raw))
-            example = self._single_prepare(raw)
+            example = self._single_prepare(
+                raw, is_current_frame=(queue_idx == len(indices) - 1))
             if example is None:
                 return None
             queue.append(example)
@@ -88,7 +124,7 @@ class KlBEVFormerDataset(KlDataset):
 
     def _collect_queue_indices(self, index: int) -> Optional[List[int]]:
         """Collect a full queue by following explicit ``prev`` links."""
-        current = self.get_data_info(index)
+        current = self._get_raw_data_info(index)
         if current is None:
             return None
 
@@ -103,7 +139,7 @@ class KlBEVFormerDataset(KlDataset):
             if prev_index is None:
                 return None
 
-            prev_info = self.get_data_info(prev_index)
+            prev_info = self._get_raw_data_info(prev_index)
             if prev_info is None:
                 return None
             if prev_info.get('scene_token') != scene_token:
@@ -130,11 +166,14 @@ class KlBEVFormerDataset(KlDataset):
             'token': raw.get('token'),
         }
 
-    def _single_prepare(self, ori_input_dict: dict) -> Optional[dict]:
+    def _single_prepare(self,
+                        ori_input_dict: dict,
+                        is_current_frame: bool = True) -> Optional[dict]:
         """Per-frame pipeline run, mirroring ``Det3DDataset.prepare_data``."""
         input_dict = copy.deepcopy(ori_input_dict)
         input_dict['box_type_3d'] = self.box_type_3d
         input_dict['box_mode_3d'] = self.box_mode_3d
+        input_dict['_kl_is_current_frame'] = is_current_frame
 
         if not self.test_mode and self.filter_empty_gt:
             if len(input_dict['ann_info']['gt_labels_3d']) == 0:
@@ -158,6 +197,17 @@ class KlBEVFormerDataset(KlDataset):
         points_list = [frame['inputs']['points'] for frame in queue]
         history_points = points_list[:-1]
         current_points = points_list[-1]
+
+        # Collect per-frame gt_instances_3d (used by track-mode detectors that
+        # supervise every frame in the queue, not just the current frame).
+        # Detection-mode detectors ignore this and read only the current
+        # frame's gt_instances_3d as before. List is ordered oldest→newest;
+        # the last entry is the current frame.
+        queue_gt_instances_3d = [
+            frame['data_samples'].gt_instances_3d
+            if hasattr(frame['data_samples'], 'gt_instances_3d') else None
+            for frame in queue
+        ]
 
         queue_metas: Dict[int, dict] = {}
         prev_ego2global = None
@@ -189,5 +239,15 @@ class KlBEVFormerDataset(KlDataset):
         sample = queue[-1]
         sample['inputs']['points'] = current_points
         sample['inputs']['history_points'] = history_points
-        sample['data_samples'].set_metainfo(dict(queue_metas=queue_metas))
+        sample['data_samples'].set_metainfo(dict(
+            queue_metas=queue_metas,
+            queue_gt_instances_3d=queue_gt_instances_3d,
+        ))
+        if self.post_pipeline is not None:
+            sample['_kl_history_data_samples'] = [
+                frame['data_samples'] for frame in queue[:-1]
+            ]
+            sample = self.post_pipeline(sample)
+            if sample is not None:
+                sample.pop('_kl_history_data_samples', None)
         return sample
