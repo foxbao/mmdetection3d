@@ -71,14 +71,14 @@ model = dict(
     test_cfg=dict(
         pts=dict(
             _delete_=True,
-            max_num=600,
+            max_num=500,
             score_threshold=0.05,
             post_center_range=[
                 -80.0, -48.0, -10.0, 80.0, 48.0, 10.0
             ])))
 
 # Deformable cross-attention cuts cross-attn memory ~10x vs full attention,
-# so batch can stay at 3 even with 6 decoder layers and 600 queries.
+# so batch can stay at 4 even with 6 decoder layers and 600 queries.
 train_dataloader = dict(batch_size=4)
 val_dataloader = dict(batch_size=2)
 test_dataloader = dict(batch_size=2)

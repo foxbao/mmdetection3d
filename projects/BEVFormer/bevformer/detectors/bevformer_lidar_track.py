@@ -390,7 +390,8 @@ class BEVFormerLidarTrack(BEVFormerLidar):
 
         inst = InstanceData()
         box_type = data_sample.metainfo['box_type_3d']
-        inst.bboxes_3d = box_type(boxes, box_dim=boxes.size(-1))
+        inst.bboxes_3d = box_type(
+            boxes, box_dim=boxes.size(-1), origin=(0.5, 0.5, 0.5))
         inst.scores_3d = scores
         inst.labels_3d = labels
         inst.instance_id = ids

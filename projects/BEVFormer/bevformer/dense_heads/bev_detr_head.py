@@ -746,7 +746,8 @@ class BEVDETRHead(BaseModule):
 
             result = InstanceData()
             box_type_3d = batch_metas[sample_idx]['box_type_3d']
-            result.bboxes_3d = box_type_3d(boxes, box_dim=boxes.size(-1))
+            result.bboxes_3d = box_type_3d(
+                boxes, box_dim=boxes.size(-1), origin=(0.5, 0.5, 0.5))
             result.scores_3d = scores
             result.labels_3d = labels
             result.query_feats = preds['query_feats'][-1, sample_idx][

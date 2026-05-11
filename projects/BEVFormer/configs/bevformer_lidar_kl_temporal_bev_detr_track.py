@@ -132,7 +132,7 @@ param_scheduler = [
          by_epoch=True, begin=1, end=6, convert_to_iter_based=True),
 ]
 
-load_from = './work_dirs/bevformer_lidar_kl_temporal_bev_detr/epoch_8.pth'
+load_from = './work_dirs/bevformer_lidar_kl_temporal_bev_detr/epoch_10.pth'
 work_dir = './work_dirs/bevformer_lidar_kl_temporal_bev_detr_track'
 
 # ---------------------------------------------------------------------- #
