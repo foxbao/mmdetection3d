@@ -1,8 +1,10 @@
-"""DETR-style detection head on top of BEV features.
+"""UniAD-aligned LiDAR BEV detection head.
 
-This is intentionally smaller than the camera BEVFormer/DETR3D head: the
-upstream detector already provides a fused BEV tensor, so the head only needs a
-query decoder over BEV memory plus set-prediction losses.
+This head is intentionally independent from ``BEVDETRHead``. It assumes the
+detector owns object queries and reference points (UniAD convention) and
+keeps the reference-point carry between decoder layers entirely in
+inverse-sigmoid / logit space. The standalone ``BEVDETRHead`` keeps its own
+sigmoid-space refine path for the legacy temporal configs.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from typing import List, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 from mmdet.models.task_modules import AssignResult
-from mmdet.models.task_modules.assigners import BaseAssigner
 from mmdet.utils import reduce_mean
 from mmengine.model import BaseModule, bias_init_with_prob
 from mmengine.structures import InstanceData
@@ -23,198 +24,16 @@ from mmcv.ops import MultiScaleDeformableAttention
 
 from mmdet3d.registry import MODELS, TASK_UTILS
 
-try:
-    from scipy.optimize import linear_sum_assignment
-except ImportError:
-    linear_sum_assignment = None
+from .bev_detr_head import denormalize_bbox, inverse_sigmoid, normalize_bbox
+from ..modules.lidar_bevformer_encoder import LearnedBEVPositionalEncoding
 
 
-def inverse_sigmoid(x: Tensor, eps: float = 1e-5) -> Tensor:
-    x = x.clamp(min=0.0, max=1.0)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1 / x2)
+class _BEVFormerDetrDecoderLayer(BaseModule):
+    """DETR decoder layer with deformable BEV cross-attention.
 
-
-def normalize_bbox(bboxes: Tensor, pc_range: Sequence[float]) -> Tensor:
-    """Convert LiDAR boxes to the DETR3D regression target layout.
-
-    Input layout is ``(cx, cy, cz, l, w, h, yaw[, vx, vy])``.  Output layout is
-    ``(cx, cy, log(l), log(w), cz, log(h), sin(yaw), cos(yaw)[, vx, vy])``.
-    The center coordinates remain metric, matching the DETR3D project code in
-    this repository.
-    """
-    cx = bboxes[..., 0:1]
-    cy = bboxes[..., 1:2]
-    cz = bboxes[..., 2:3]
-    length = bboxes[..., 3:4].clamp(min=1e-5).log()
-    width = bboxes[..., 4:5].clamp(min=1e-5).log()
-    height = bboxes[..., 5:6].clamp(min=1e-5).log()
-    yaw = bboxes[..., 6:7]
-    parts = [cx, cy, length, width, cz, height, yaw.sin(), yaw.cos()]
-    if bboxes.size(-1) > 7:
-        parts.extend([bboxes[..., 7:8], bboxes[..., 8:9]])
-    return torch.cat(parts, dim=-1)
-
-
-def denormalize_bbox(preds: Tensor) -> Tensor:
-    """Convert predicted DETR layout to LiDAR box tensor layout."""
-    yaw = torch.atan2(preds[..., 6:7], preds[..., 7:8])
-    length = preds[..., 2:3].exp()
-    width = preds[..., 3:4].exp()
-    height = preds[..., 5:6].exp()
-    parts = [
-        preds[..., 0:1], preds[..., 1:2], preds[..., 4:5], length, width,
-        height, yaw
-    ]
-    if preds.size(-1) > 8:
-        parts.extend([preds[..., 8:9], preds[..., 9:10]])
-    return torch.cat(parts, dim=-1)
-
-
-@TASK_UTILS.register_module()
-class BEVDETRBBox3DL1Cost:
-    """L1 matching cost for DETR-layout 3D boxes."""
-
-    def __init__(self, weight: float = 1.0) -> None:
-        self.weight = weight
-
-    def __call__(self, bbox_pred: Tensor, gt_bboxes: Tensor) -> Tensor:
-        return torch.cdist(bbox_pred, gt_bboxes, p=1) * self.weight
-
-
-@TASK_UTILS.register_module()
-class BEVDETRIoU3DCost:
-    """Negative-IoU matching cost for BEVDETR. Takes precomputed IoU tensor."""
-
-    def __init__(self, weight: float = 1.0) -> None:
-        self.weight = weight
-
-    def __call__(self, iou: Tensor) -> Tensor:
-        return -iou * self.weight
-
-
-@TASK_UTILS.register_module()
-class BEVDETRHungarianAssigner3D(BaseAssigner):
-    """Hungarian assigner for BEVDETRHead.
-
-    This keeps a unique registry name so configs can import BEVFusion and this
-    head together without clashing with other project-local assigners.
-    """
-
-    def __init__(self,
-                 cls_cost: dict,
-                 reg_cost: dict,
-                 pc_range: Sequence[float],
-                 pi_symmetric_class_indices: Optional[Sequence[int]] = None,
-                 iou_cost: Optional[dict] = None,
-                 iou_calculator: Optional[dict] = None) -> None:
-        self.cls_cost = TASK_UTILS.build(cls_cost)
-        self.reg_cost = TASK_UTILS.build(reg_cost)
-        self.pc_range = pc_range
-        self.pi_symmetric_class_indices = (
-            list(pi_symmetric_class_indices)
-            if pi_symmetric_class_indices else [])
-        self.iou_cost = TASK_UTILS.build(iou_cost) if iou_cost else None
-        self.iou_calculator = (TASK_UTILS.build(iou_calculator)
-                               if iou_calculator else None)
-        if (self.iou_cost is None) != (self.iou_calculator is None):
-            raise ValueError('iou_cost and iou_calculator must be both '
-                             'set or both omitted.')
-
-    # Hungarian matching is target assignment, not a learnable operation.
-    # Keep the whole cost construction out of autograd; otherwise the optional
-    # 3D-IoU matching cost can build a large graph that is discarded only after
-    # ``cost.detach().cpu()``, causing training memory to grow over iterations.
-    @torch.no_grad()
-    def assign(self,
-               bbox_pred: Tensor,
-               cls_pred: Tensor,
-               gt_bboxes: Tensor,
-               gt_labels: Tensor,
-               gt_bboxes_ignore=None,
-               eps: float = 1e-7) -> AssignResult:
-        assert gt_bboxes_ignore is None, \
-            'BEVDETRHungarianAssigner3D does not support ignored boxes.'
-        num_gts = gt_bboxes.size(0)
-        num_bboxes = bbox_pred.size(0)
-        assigned_gt_inds = bbox_pred.new_full(
-            (num_bboxes, ), -1, dtype=torch.long)
-        assigned_labels = bbox_pred.new_full(
-            (num_bboxes, ), -1, dtype=torch.long)
-        if num_gts == 0 or num_bboxes == 0:
-            if num_gts == 0:
-                assigned_gt_inds[:] = 0
-            return AssignResult(
-                num_gts, assigned_gt_inds, None, labels=assigned_labels)
-
-        pred_instances = InstanceData(scores=cls_pred)
-        gt_instances = InstanceData(labels=gt_labels)
-        cls_cost = self.cls_cost(pred_instances, gt_instances)
-        normalized_gt_bboxes = normalize_bbox(gt_bboxes, self.pc_range)
-        if normalized_gt_bboxes.size(-1) < bbox_pred.size(-1):
-            normalized_gt_bboxes = F.pad(
-                normalized_gt_bboxes,
-                (0, bbox_pred.size(-1) - normalized_gt_bboxes.size(-1)))
-        reg_cost = self.reg_cost(
-            bbox_pred[:, :8], normalized_gt_bboxes[:, :8])
-
-        # For pi-symmetric classes (e.g. IGV, WheelCrane in port scenes), yaw
-        # and yaw + pi are physically identical, so the matching cost should
-        # take the cheaper of the two orientations per-GT to avoid penalising
-        # ambiguous head/tail labels.
-        if self.pi_symmetric_class_indices:
-            sym_gt_mask = torch.zeros_like(gt_labels, dtype=torch.bool)
-            for cls_idx in self.pi_symmetric_class_indices:
-                sym_gt_mask |= (gt_labels == cls_idx)
-            if sym_gt_mask.any():
-                flipped_gt = normalized_gt_bboxes.clone()
-                flipped_gt[:, 6] = -flipped_gt[:, 6]
-                flipped_gt[:, 7] = -flipped_gt[:, 7]
-                reg_cost_flip = self.reg_cost(
-                    bbox_pred[:, :8], flipped_gt[:, :8])
-                reg_cost = torch.where(
-                    sym_gt_mask[None, :], torch.minimum(reg_cost, reg_cost_flip),
-                    reg_cost)
-
-        cost = cls_cost + reg_cost
-
-        if self.iou_cost is not None:
-            # IoU is computed on decoded 7-dim LiDAR boxes (no grad through
-            # matching). BEV nearest IoU is yaw mod pi by construction, so
-            # symmetric classes need no special handling here.
-            pred_dec = denormalize_bbox(bbox_pred[:, :8])[:, :7]
-            gt_dec = gt_bboxes[:, :7]
-            iou = self.iou_calculator(pred_dec, gt_dec)
-            cost = cost + self.iou_cost(iou)
-
-        cost = cost.detach().cpu()
-        if torch.isnan(cost).any() or torch.isinf(cost).any():
-            cost = torch.nan_to_num(
-                cost, nan=100.0, posinf=100.0, neginf=-100.0)
-
-        if linear_sum_assignment is None:
-            raise ImportError('Please install scipy for Hungarian matching.')
-        matched_row_inds, matched_col_inds = linear_sum_assignment(cost)
-        matched_row_inds = torch.from_numpy(matched_row_inds).to(
-            bbox_pred.device)
-        matched_col_inds = torch.from_numpy(matched_col_inds).to(
-            bbox_pred.device)
-
-        assigned_gt_inds[:] = 0
-        assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
-        assigned_labels[matched_row_inds] = gt_labels[matched_col_inds]
-        return AssignResult(
-            num_gts, assigned_gt_inds, None, labels=assigned_labels)
-
-
-class _BEVDetrDecoderLayer(BaseModule):
-    """A DETR decoder layer with deformable BEV cross-attention.
-
-    Self-attention is the standard nn.MultiheadAttention; cross-attention is
-    MultiScaleDeformableAttention, sampling K points per query around the
-    query's reference point on the BEV memory. This matches BEVFormer's
-    DetectionTransformerDecoder.
+    Identical structure to the layer used by ``BEVDETRHead`` (self-attn +
+    deformable cross-attn + FFN), kept local so this head has no inheritance
+    coupling.
     """
 
     def __init__(self,
@@ -248,21 +67,10 @@ class _BEVDetrDecoderLayer(BaseModule):
     def forward(self, query: Tensor, query_pos: Tensor, value: Tensor,
                 reference_points: Tensor, spatial_shapes: Tensor,
                 level_start_index: Tensor) -> Tensor:
-        """Args:
-            query: (N_q, B, D) — sequence-first to match self-attn
-            query_pos: (N_q, B, D)
-            value: (B, N_kv, D) — flattened BEV memory, batch-first
-            reference_points: (B, N_q, num_levels, 2), normalized [0, 1]
-            spatial_shapes: (num_levels, 2), each row is (H, W)
-            level_start_index: (num_levels,)
-        """
-        # Self-attn (sequence-first)
         q = k = query + query_pos
         query2 = self.self_attn(q, k, value=query)[0]
         query = self.norm1(query + self.dropout1(query2))
 
-        # Deformable cross-attn (batch-first). Internally adds query_pos to
-        # query and applies its own residual + dropout.
         query_b = query.permute(1, 0, 2).contiguous()
         query_pos_b = query_pos.permute(1, 0, 2).contiguous()
         query_b = self.cross_attn(
@@ -281,13 +89,27 @@ class _BEVDetrDecoderLayer(BaseModule):
 
 
 @MODELS.register_module()
-class BEVDETRHead(BaseModule):
-    """DETR-style 3D detection head over a single BEV feature map."""
+class BEVFormerDETRHead(BaseModule):
+    """UniAD-aligned DETR head over BEVFormer-style BEV features.
+
+    The detector supplies object queries and inverse-sigmoid reference points
+    each call. The head owns:
+      * the BEV query / positional encoding consumed by the BEV encoder, plus
+        the LiDAR-feature projection;
+      * the ``transformer`` (UniAD's BEV encoder boundary);
+      * the deformable DETR decoder, cls/reg branches, losses, and
+        assignment + prediction utilities.
+
+    Box refinement is done entirely in logit space — ``reference_points`` in
+    the returned dict is logit-space, matching UniAD's ``last_ref_points``.
+    """
 
     def __init__(self,
                  in_channels: int,
                  num_classes: int,
-                 num_query: int = 300,
+                 transformer: dict,
+                 bev_h: int,
+                 bev_w: int,
                  embed_dims: int = 256,
                  num_decoder_layers: int = 6,
                  num_heads: int = 8,
@@ -298,8 +120,9 @@ class BEVDETRHead(BaseModule):
                  code_size: int = 10,
                  code_weights: Optional[Sequence[float]] = None,
                  pc_range: Optional[Sequence[float]] = None,
-                 bev_feature_layout: str = 'xy',
                  with_box_refine: bool = True,
+                 lidar_in_channels: Optional[int] = None,
+                 bev_embed_dims: Optional[int] = None,
                  loss_cls: dict = dict(
                      type='mmdet.FocalLoss',
                      use_sigmoid=True,
@@ -314,28 +137,30 @@ class BEVDETRHead(BaseModule):
                  loss_iou: Optional[dict] = None,
                  train_cfg: Optional[dict] = None,
                  test_cfg: Optional[dict] = None,
-                 init_cfg: Optional[dict] = None) -> None:
+                 init_cfg: Optional[dict] = None,
+                 # Accepted for config-symmetry with BEVDETRHead; this head
+                 # does not own queries, so num_query is informational only.
+                 num_query: Optional[int] = None) -> None:
         super().__init__(init_cfg=init_cfg)
-        if bev_feature_layout not in ('xy', 'yx'):
-            raise ValueError('bev_feature_layout must be "xy" or "yx", '
-                             f'got {bev_feature_layout}.')
         if pc_range is None:
-            raise ValueError('pc_range is required for BEVDETRHead.')
+            raise ValueError('pc_range is required for BEVFormerDETRHead.')
 
-        self.in_channels = in_channels
+        self.in_channels = int(in_channels)
         self.num_classes = num_classes
-        self.num_query = num_query
         self.embed_dims = embed_dims
         self.num_decoder_layers = num_decoder_layers
         self.num_points = num_points
         self.code_size = code_size
         self.pc_range = list(pc_range)
-        self.bev_feature_layout = bev_feature_layout
         self.with_box_refine = with_box_refine
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg or {}
         self.pi_symmetric_class_indices = list(
             (train_cfg or {}).get('pi_symmetric_class_indices', []) or [])
+        self.num_query = num_query
+        self.bev_h = bev_h
+        self.bev_w = bev_w
+        self.lidar_in_channels = int(lidar_in_channels or self.in_channels)
 
         if code_weights is None:
             code_weights = [1.0, 1.0, 1.0, 1.0, 1.0,
@@ -348,19 +173,46 @@ class BEVDETRHead(BaseModule):
             torch.tensor(code_weights, dtype=torch.float32),
             persistent=False)
 
+        # ---- BEV encoder boundary (matches UniAD BEVFormerTrackHead) -------
+        transformer = dict(transformer)
+        configured_embed_dims = transformer.get('embed_dims')
+        self.bev_embed_dims = int(bev_embed_dims or configured_embed_dims
+                                  or self.in_channels)
+        if (configured_embed_dims is not None
+                and configured_embed_dims != self.bev_embed_dims):
+            raise ValueError('transformer.embed_dims must match '
+                             'bev_embed_dims: '
+                             f'{configured_embed_dims} vs '
+                             f'{self.bev_embed_dims}.')
+        if self.bev_embed_dims != self.in_channels:
+            raise ValueError('bev_embed_dims must match in_channels because '
+                             'the encoded BEV is fed directly into the '
+                             'decoder: '
+                             f'{self.bev_embed_dims} vs {self.in_channels}.')
+
+        self.lidar_input_proj = (
+            nn.Identity()
+            if self.lidar_in_channels == self.bev_embed_dims else nn.Conv2d(
+                self.lidar_in_channels, self.bev_embed_dims, kernel_size=1))
+        self.bev_embedding = nn.Embedding(bev_h * bev_w,
+                                          self.bev_embed_dims)
+        self.positional_encoding = LearnedBEVPositionalEncoding(
+            bev_h, bev_w, self.bev_embed_dims)
+        transformer.setdefault('bev_h', bev_h)
+        transformer.setdefault('bev_w', bev_w)
+        transformer.setdefault('embed_dims', self.bev_embed_dims)
+        self.transformer = MODELS.build(transformer)
+
+        # ---- DETR decoder over BEV memory ----------------------------------
         self.input_proj = nn.Conv2d(in_channels, embed_dims, kernel_size=1)
-        self.query_embed = nn.Embedding(num_query, embed_dims)
-        self.query_pos_embed = nn.Embedding(num_query, embed_dims)
-        self.reference_points = nn.Linear(embed_dims, 3)
 
         self.decoder_layers = nn.ModuleList([
-            _BEVDetrDecoderLayer(
+            _BEVFormerDetrDecoderLayer(
                 embed_dims=embed_dims, num_heads=num_heads,
                 num_points=num_points, num_levels=1,
                 ffn_channels=ffn_channels, dropout=dropout)
             for _ in range(num_decoder_layers)
         ])
-        # Independent branches per layer (required for iterative box refine).
         self.cls_branches = nn.ModuleList(
             [self._make_cls_branch(num_reg_fcs)
              for _ in range(num_decoder_layers)])
@@ -368,6 +220,7 @@ class BEVDETRHead(BaseModule):
             [self._make_reg_branch(num_reg_fcs)
              for _ in range(num_decoder_layers)])
 
+        # ---- losses / assigner --------------------------------------------
         self.loss_cls = MODELS.build(loss_cls)
         self.loss_bbox = MODELS.build(loss_bbox)
         self.loss_iou = MODELS.build(loss_iou) if loss_iou else None
@@ -404,100 +257,99 @@ class BEVDETRHead(BaseModule):
         super().init_weights()
         nn.init.xavier_uniform_(self.input_proj.weight)
         nn.init.constant_(self.input_proj.bias, 0)
-        nn.init.xavier_uniform_(self.reference_points.weight)
-        nn.init.constant_(self.reference_points.bias, 0)
         if getattr(self.loss_cls, 'use_sigmoid', False):
             bias_init = bias_init_with_prob(0.01)
             for cls_branch in self.cls_branches:
                 nn.init.constant_(cls_branch[-1].bias, bias_init)
 
-    def generate_init_query_embeds(self) -> Tensor:
-        """Return the learnable queries in UniAD-style [N, 2*D] format.
+    # ----------------------- BEV encoder front-door ------------------------
 
-        First half is query_pos, second half is query_feat. This is the
-        starting point for track instances at the beginning of a clip.
-        """
-        return torch.cat([self.query_pos_embed.weight,
-                          self.query_embed.weight], dim=-1)
+    def get_bev_features(self,
+                         lidar_bev: Tensor,
+                         prev_bev: Optional[Tensor] = None,
+                         queue_meta: Optional[Sequence[dict]] = None
+                         ) -> Tensor:
+        batch_size, channels, bev_h, bev_w = lidar_bev.shape
+        expected_shape = (self.lidar_in_channels, self.bev_h, self.bev_w)
+        if (channels, bev_h, bev_w) != expected_shape:
+            raise ValueError('lidar_bev shape mismatch for '
+                             'BEVFormerDETRHead: expected '
+                             f'(B, {expected_shape[0]}, {expected_shape[1]}, '
+                             f'{expected_shape[2]}), got '
+                             f'{tuple(lidar_bev.shape)}.')
+        if prev_bev is not None:
+            expected_prev_shape = (
+                batch_size, self.bev_embed_dims, self.bev_h, self.bev_w)
+            if tuple(prev_bev.shape) != expected_prev_shape:
+                raise ValueError('prev_bev shape mismatch for '
+                                 'BEVFormerDETRHead: expected '
+                                 f'{expected_prev_shape}, got '
+                                 f'{tuple(prev_bev.shape)}.')
+
+        encoder_lidar_bev = self.lidar_input_proj(lidar_bev)
+        bev_queries = self.bev_embedding.weight.to(
+            dtype=lidar_bev.dtype, device=lidar_bev.device)
+        bev_pos = self.positional_encoding(batch_size, lidar_bev.device,
+                                           lidar_bev.dtype)
+        return self.transformer.get_bev_features(
+            encoder_lidar_bev, bev_queries=bev_queries, bev_pos=bev_pos,
+            prev_bev=prev_bev, queue_meta=queue_meta)
+
+    # ------------------------------ decoder --------------------------------
 
     @staticmethod
-    def _unwrap_feats(feats: List[Tensor]) -> Tensor:
+    def _unwrap_feats(feats) -> Tensor:
         if not isinstance(feats, (list, tuple)) or len(feats) != 1:
-            raise ValueError('BEVDETRHead expects a single BEV feature map, '
-                             f'got {type(feats)} with len={len(feats)}.')
+            raise ValueError('BEVFormerDETRHead expects a single BEV feature '
+                             f'map, got {type(feats)} with len={len(feats)}.')
         return feats[0]
 
-    def _to_msda_reference(self, reference_xy: Tensor) -> Tensor:
-        """Reorder (cx, cy) -> MSDA's (W_frac, H_frac) layout.
-
-        Our `reference[..., 0:2]` is (cx_norm, cy_norm) where cx is along the
-        ego X axis and cy along Y. MSDA interprets the last dim as
-        (x_in_W, y_in_H). For BEV layout 'xy' the tensor is [B, C, H=X, W=Y],
-        so the X axis corresponds to the H dimension — we swap. For 'yx'
-        the mapping is already aligned.
-        """
-        if self.bev_feature_layout == 'xy':
-            # (cx, cy) -> (cy, cx)   because W corresponds to Y, H to X.
-            return reference_xy[..., [1, 0]]
-        return reference_xy
-
-    def forward(self, feats: List[Tensor],
-                object_query_embeds: Optional[Tensor] = None,
-                ref_points: Optional[Tensor] = None) -> dict:
-        """Run the deformable DETR decoder over BEV features.
+    def forward(self, feats, object_query_embeds: Tensor,
+                ref_points: Tensor) -> dict:
+        """Run decoder. ``object_query_embeds`` and ``ref_points`` are
+        mandatory and supplied by the detector (UniAD convention).
 
         Args:
             feats: Single-element list containing BEV tensor [B, C, H, W].
-            object_query_embeds: Optional external queries [N, 2*D] where the
-                first half is query_pos and the second half is query_feat.
-                When None, uses the internal learned embeddings (detection
-                mode). This is the entry point for track-query injection.
-            ref_points: Optional reference points [B, N, 3] in sigmoid space
-                with semantics (cx_norm, cy_norm, cz_norm). When None,
-                derived from query_pos via ``self.reference_points``.
+            object_query_embeds: [N, 2*D] where first half is query_pos,
+                second half is query_feat.
+            ref_points: [B, N, 3] logit-space reference points
+                (inverse_sigmoid of normalized (cx, cy, cz)).
         """
+        if object_query_embeds is None or ref_points is None:
+            raise ValueError('BEVFormerDETRHead.forward requires '
+                             'object_query_embeds and ref_points; the '
+                             'detector owns these tensors.')
+
         bev = self._unwrap_feats(feats)
         batch_size, _, bev_h, bev_w = bev.shape
 
-        # MSDA wants value in batch-first layout [B, HW, D] plus
-        # spatial_shapes [(H, W)] and level_start_index [(0,)].
-        memory = self.input_proj(bev)  # [B, D, H, W]
-        memory = memory.flatten(2).transpose(1, 2).contiguous()  # [B, HW, D]
+        memory = self.input_proj(bev)
+        memory = memory.flatten(2).transpose(1, 2).contiguous()
         spatial_shapes = torch.as_tensor(
             [[bev_h, bev_w]], dtype=torch.long, device=bev.device)
         level_start_index = torch.as_tensor(
             [0], dtype=torch.long, device=bev.device)
 
-        if object_query_embeds is not None:
-            # UniAD-style: [N, 2*D] -> split into pos and feat
-            dim = object_query_embeds.shape[-1] // 2
-            query_pos_w = object_query_embeds[:, :dim]
-            query_feat_w = object_query_embeds[:, dim:]
-            query = query_feat_w[:, None, :].expand(-1, batch_size, -1)
-            query_pos = query_pos_w[:, None, :].expand(-1, batch_size, -1)
-        else:
-            query = self.query_embed.weight[:, None, :].repeat(
-                1, batch_size, 1)
-            query_pos = self.query_pos_embed.weight[:, None, :].repeat(
-                1, batch_size, 1)
+        dim = object_query_embeds.shape[-1] // 2
+        query_pos_w = object_query_embeds[:, :dim]
+        query_feat_w = object_query_embeds[:, dim:]
+        query = query_feat_w[:, None, :].expand(-1, batch_size, -1)
+        query_pos = query_pos_w[:, None, :].expand(-1, batch_size, -1)
 
-        if ref_points is not None:
-            reference = ref_points
-        else:
-            if object_query_embeds is not None:
-                reference = self.reference_points(query_pos_w).sigmoid()
-            else:
-                reference = self.reference_points(
-                    self.query_pos_embed.weight).sigmoid()
-            reference = reference[None].expand(batch_size, -1, -1)
+        # ref_points is logit-space. Sampling uses sigmoid coords; refine adds
+        # reg delta directly in logit space and re-sigmoids for the next layer.
+        ref_logit = ref_points
+        reference = ref_logit.sigmoid()
 
         all_cls_scores = []
         all_bbox_preds = []
         query_feats = []
+        last_ref_points = ref_logit
         for layer_id, layer in enumerate(self.decoder_layers):
-            # MSDA reference: [B, N, num_levels=1, 2] in (W_frac, H_frac).
-            msda_ref = self._to_msda_reference(reference[..., :2])
-            msda_ref = msda_ref.unsqueeze(2).contiguous()
+            # BEV memory is [B, C, H=Y, W=X]; MSDA's reference is
+            # (W_frac, H_frac) = (cx_norm, cy_norm) with no swap.
+            msda_ref = reference[..., :2].unsqueeze(2).contiguous()
 
             query = layer(query, query_pos, memory, msda_ref,
                           spatial_shapes, level_start_index)
@@ -505,34 +357,32 @@ class BEVDETRHead(BaseModule):
             query_b = query.permute(1, 0, 2).contiguous()
             cls_score = self.cls_branches[layer_id](query_b)
             reg_raw = self.reg_branches[layer_id](query_b)
-            bbox_pred = self._decode_regression(reg_raw, reference)
+            bbox_pred = self._decode_regression(reg_raw, ref_logit)
             all_cls_scores.append(cls_score)
             all_bbox_preds.append(bbox_pred)
             query_feats.append(query_b)
 
+            # UniAD carry: refined xy/z stay in logit space; next layer
+            # re-sigmoids for sampling.
+            refined_xy = reg_raw[..., 0:2] + ref_logit[..., 0:2]
+            refined_z = reg_raw[..., 4:5] + ref_logit[..., 2:3]
+            last_ref_points = torch.cat([refined_xy, refined_z], dim=-1)
             if self.with_box_refine and layer_id < len(self.decoder_layers) - 1:
-                # Iterative refine: add reg delta to current ref in sigmoid
-                # space, detach to bound backprop depth (BEVFormer convention).
-                new_ref = reference.new_zeros(reference.shape)
-                ref_logit = inverse_sigmoid(reference)
-                new_ref[..., 0:2] = (
-                    reg_raw[..., 0:2] + ref_logit[..., 0:2]).sigmoid()
-                new_ref[..., 2:3] = (
-                    reg_raw[..., 4:5] + ref_logit[..., 2:3]).sigmoid()
-                reference = new_ref.detach()
+                ref_logit = last_ref_points.detach()
+                reference = ref_logit.sigmoid()
 
         return dict(
             all_cls_scores=torch.stack(all_cls_scores),
             all_bbox_preds=torch.stack(all_bbox_preds),
             query_feats=torch.stack(query_feats),
-            reference_points=reference,
+            reference_points=last_ref_points.detach(),
         )
 
-    def _decode_regression(self, raw: Tensor, reference: Tensor) -> Tensor:
+    def _decode_regression(self, raw: Tensor, reference_logit: Tensor) -> Tensor:
         raw = raw.clone()
-        ref = inverse_sigmoid(reference)
-        raw[..., 0:2] = (raw[..., 0:2] + ref[..., 0:2]).sigmoid()
-        raw[..., 4:5] = (raw[..., 4:5] + ref[..., 2:3]).sigmoid()
+        raw[..., 0:2] = (raw[..., 0:2] + reference_logit[..., 0:2]).sigmoid()
+        raw[..., 4:5] = (
+            raw[..., 4:5] + reference_logit[..., 2:3]).sigmoid()
 
         raw[..., 0:1] = raw[..., 0:1] * (
             self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
@@ -542,28 +392,17 @@ class BEVDETRHead(BaseModule):
             self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
         return raw
 
-    def get_detections(self, feats: List[Tensor],
-                       object_query_embeds: Optional[Tensor] = None,
-                       ref_points: Optional[Tensor] = None) -> dict:
-        """UniAD-compatible entry: run decoder with external queries.
-
-        This is the interface that the tracking detector will call per-frame.
-        It is functionally identical to forward() but named explicitly to
-        match UniAD's convention and make the call site self-documenting.
-        """
+    def get_detections(self, feats, object_query_embeds: Tensor,
+                       ref_points: Tensor) -> dict:
+        """UniAD-compatible entry point — alias for ``forward``."""
         return self.forward(feats, object_query_embeds=object_query_embeds,
                             ref_points=ref_points)
 
-    def loss(self, feats: List[Tensor], batch_data_samples: List,
-             **kwargs) -> dict:
-        preds = self(feats)
-        batch_gt_instances = [
-            sample.gt_instances_3d for sample in batch_data_samples
-        ]
-        return self.loss_by_feat(preds, batch_gt_instances)
+    # ------------------------- target / loss ------------------------------
 
     def _get_targets_single(self, cls_score: Tensor, bbox_pred: Tensor,
-                            gt_instances_3d: InstanceData) -> Tuple[Tensor, ...]:
+                            gt_instances_3d: InstanceData
+                            ) -> Tuple[Tensor, ...]:
         gt_bboxes_3d = gt_instances_3d.bboxes_3d
         gt_bboxes = torch.cat(
             [gt_bboxes_3d.gravity_center, gt_bboxes_3d.tensor[:, 3:]], dim=1)
@@ -586,9 +425,6 @@ class BEVDETRHead(BaseModule):
             assigned_gt = gt_inds[pos_inds] - 1
             labels[pos_inds] = gt_labels[assigned_gt]
             target = normalize_bbox(gt_bboxes[assigned_gt], self.pc_range)
-            # Only supervise the dims the GT actually carries; padding the rest
-            # with zero would otherwise pull velocity (and any other absent
-            # channel) toward zero under L1.
             real_dims = min(target.size(-1), self.code_size)
             if target.size(-1) < self.code_size:
                 target = F.pad(target, (0, self.code_size - target.size(-1)))
@@ -637,9 +473,6 @@ class BEVDETRHead(BaseModule):
         num_total_pos = torch.clamp(reduce_mean(num_total_pos),
                                     min=1).item()
         bbox_preds = batch_bbox_preds.reshape(-1, self.code_size)
-        # For pi-symmetric classes, theta and theta + pi are equivalent. Flip
-        # the GT (sin, cos) target to whichever branch is closer to the
-        # current prediction so we don't fight ambiguous head/tail labels.
         if self.pi_symmetric_class_indices:
             sym_mask = torch.zeros_like(labels, dtype=torch.bool)
             for cls_idx in self.pi_symmetric_class_indices:
@@ -668,13 +501,19 @@ class BEVDETRHead(BaseModule):
             bbox_weights[valid],
             avg_factor=num_total_pos)
 
+        with torch.no_grad():
+            vel_mask = valid & (bbox_weights[:, 8:10].sum(dim=-1) > 0)
+            if vel_mask.any():
+                vel_diff = bbox_preds[vel_mask, 8:10] - \
+                    bbox_targets[vel_mask, 8:10]
+                vel_l1 = vel_diff.abs().mean()
+                vel_l2 = vel_diff.norm(dim=-1).mean()
+            else:
+                vel_l1 = bbox_preds.new_zeros(())
+                vel_l2 = bbox_preds.new_zeros(())
+
         loss_iou = None
         if self.loss_iou is not None:
-            # Axis-aligned BEV GIoU on decoded boxes. Rotated 3D IoU is not
-            # differentiable in mmdet3d, so we fall back to the tight BEV
-            # bbox [x1, y1, x2, y2] around (cx, cy, dx, dy) — this still
-            # correlates strongly with rotated IoU because port actors have
-            # moderate aspect ratios.
             pos_bbox_weights = bbox_weights.sum(dim=-1) > 0
             pos_mask = pos_bbox_weights & valid
             if pos_mask.any():
@@ -693,7 +532,9 @@ class BEVDETRHead(BaseModule):
             else:
                 loss_iou = bbox_preds.new_zeros(())
         return (torch.nan_to_num(loss_cls), torch.nan_to_num(loss_bbox),
-                torch.nan_to_num(loss_iou) if loss_iou is not None else None)
+                torch.nan_to_num(loss_iou) if loss_iou is not None else None,
+                torch.nan_to_num(vel_l1).detach(),
+                torch.nan_to_num(vel_l2).detach())
 
     def loss_by_feat(self, preds: dict,
                      batch_gt_instances: List[InstanceData]) -> dict:
@@ -702,16 +543,23 @@ class BEVDETRHead(BaseModule):
         losses_cls = []
         losses_bbox = []
         losses_iou = []
+        vel_l1_list = []
+        vel_l2_list = []
         for cls_scores, bbox_preds in zip(all_cls_scores, all_bbox_preds):
-            loss_cls, loss_bbox, loss_iou = self.loss_by_feat_single(
+            loss_cls, loss_bbox, loss_iou, vel_l1, vel_l2 = \
+                self.loss_by_feat_single(
                 cls_scores, bbox_preds, batch_gt_instances)
             losses_cls.append(loss_cls)
             losses_bbox.append(loss_bbox)
             losses_iou.append(loss_iou)
+            vel_l1_list.append(vel_l1)
+            vel_l2_list.append(vel_l2)
 
         loss_dict = dict(
             loss_cls=losses_cls[-1],
             loss_bbox=losses_bbox[-1],
+            vel_l1=vel_l1_list[-1],
+            vel_l2=vel_l2_list[-1],
         )
         if losses_iou[-1] is not None:
             loss_dict['loss_iou'] = losses_iou[-1]
@@ -722,21 +570,13 @@ class BEVDETRHead(BaseModule):
                 loss_dict[f'd{i}.loss_iou'] = losses_iou[i]
         return loss_dict
 
-    def predict(self, feats: List[Tensor], batch_data_samples: List,
-                rescale: bool = False, **kwargs) -> List[InstanceData]:
-        preds = self(feats)
-        if len(batch_data_samples) > 0 and hasattr(batch_data_samples[0],
-                                                   'metainfo'):
-            batch_metas = [sample.metainfo for sample in batch_data_samples]
-        else:
-            batch_metas = batch_data_samples
-        return self.predict_by_feat(preds, batch_metas)
+    # ----------------------------- predict --------------------------------
 
     def predict_by_feat(self, preds: dict,
                         batch_metas: List[dict]) -> List[InstanceData]:
         cls_scores = preds['all_cls_scores'][-1].sigmoid()
         bbox_preds = preds['all_bbox_preds'][-1]
-        max_num = int(self.test_cfg.get('max_num', self.num_query))
+        max_num = int(self.test_cfg.get('max_num', cls_scores.size(1)))
         score_threshold = self.test_cfg.get('score_threshold', None)
         post_center_range = self.test_cfg.get('post_center_range', None)
 
