@@ -6,11 +6,10 @@ Two modes are supported:
    for voxel / spconv models such as BEVFormerLidar):
 
    python tools/visualize_kl_velocity.py \
-       --config projects/BEVFormer/configs/bevformer_lidar_kl_temporal_centerhead.py \
-       --checkpoint work_dirs/bevformer_lidar_kl_temporal_centerhead/epoch_6.pth \
-       --out-dir work_dirs/vis_temporal_centerhead_epoch6 \
-       --device cuda:0 \
-       --max-frames 20
+       --config projects/BEVFormer/configs/bevformer_lidar_kl_uniad_det.py \
+       --checkpoint work_dirs/bevformer_lidar_kl_uniad_det/epoch_5.pth \
+       --out-dir work_dirs/vis_uniad_det_epoch5_velocity \
+       --device cuda:0 --max-frames 20 --annotate
 
 2. Offline visualization from a saved ``results_nusc.json`` file:
 
@@ -80,6 +79,12 @@ def parse_args():
         '--device',
         default='cuda:0',
         help='device for online inference, e.g. cuda:0')
+    parser.add_argument(
+        '--eval-prev-bev-mode',
+        default='history',
+        choices=['auto', 'online', 'history'],
+        help='BEVFormerLidarUniAD prev-BEV mode for online inference. '
+        'history is robust when visualizing non-consecutive frame indices.')
     parser.add_argument(
         '--score-thr',
         type=float,
@@ -625,6 +630,8 @@ def run_offline(cfg: Config, args) -> None:
 def run_online(cfg: Config, args) -> None:
     dataset_cfg = get_dataset_cfg(cfg, args.split)
     dataset = DATASETS.build(dataset_cfg)
+    if 'eval_prev_bev_mode' in cfg.model:
+        cfg.model.eval_prev_bev_mode = args.eval_prev_bev_mode
     model = init_model(cfg, args.checkpoint, device=args.device)
     model.eval()
 
@@ -665,10 +672,10 @@ def run_online(cfg: Config, args) -> None:
             pred_sample = model.test_step(pseudo_collate([data]))[0]
 
         pred_instances = pred_sample.pred_instances_3d
-        keep = pred_instances.scores_3d > args.score_thr
+        scores = pred_instances.scores_3d
+        order = torch.argsort(scores, descending=True)
+        keep = order[scores[order] > args.score_thr][:args.topk]
         pred_instances = pred_instances[keep]
-        if len(pred_instances) > args.topk:
-            pred_instances = pred_instances[:args.topk]
 
         gt_data = gt_arrays_from_ann_info(info.get('eval_ann_info', {}))
         pred_data = dict(
