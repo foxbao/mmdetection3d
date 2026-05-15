@@ -35,6 +35,7 @@ class KlTrackingMetric(BaseMetric):
                  class_names: Optional[List[str]] = None,
                  match_threshold: float = 2.0,
                  num_thresholds: int = 40,
+                 evaluate_predicted_samples_only: bool = False,
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None) -> None:
         super().__init__(collect_device=collect_device, prefix=prefix)
@@ -42,6 +43,7 @@ class KlTrackingMetric(BaseMetric):
         self.class_names = class_names or TRACKING_CLASSES
         self.match_threshold = match_threshold
         self.num_thresholds = num_thresholds
+        self.evaluate_predicted_samples_only = evaluate_predicted_samples_only
 
     # -------------------------------------------------------------- #
     # process: collect per-frame predictions
@@ -50,8 +52,14 @@ class KlTrackingMetric(BaseMetric):
     def process(self, data_batch: dict,
                 data_samples: Sequence[dict]) -> None:
         for data_sample in data_samples:
-            pred = data_sample['pred_instances_3d']
-            centers = pred['bboxes_3d'].tensor.cpu().numpy()[:, :3]
+            pred = data_sample.get('pred_track_instances_3d')
+            if pred is None:
+                pred = data_sample['pred_instances_3d']
+            bboxes_3d = pred['bboxes_3d']
+            if hasattr(bboxes_3d, 'gravity_center'):
+                centers = bboxes_3d.gravity_center.cpu().numpy()
+            else:
+                centers = bboxes_3d.tensor.cpu().numpy()[:, :3]
             scores = pred['scores_3d'].cpu().numpy()
             labels = pred['labels_3d'].cpu().numpy()
             track_ids = pred.get('instance_id', None)
@@ -73,9 +81,21 @@ class KlTrackingMetric(BaseMetric):
 
     def compute_metrics(self, results: List[dict]) -> Dict[str, float]:
         data_infos = load(self.ann_file)['data_list']
+        pred_by_idx = {r['sample_idx']: r for r in results}
+        if self.evaluate_predicted_samples_only:
+            pred_indices = set(pred_by_idx)
+            raw_count = len(data_infos)
+            data_infos = [
+                info for info in data_infos
+                if info.get('sample_idx') in pred_indices
+            ]
+            print_log(
+                'KL tracking eval is restricted to predicted samples: '
+                f'{len(data_infos)}/{raw_count} frames.',
+                logger='current')
+
         gt_by_idx = self._build_gt_lookup(data_infos)
         scenes = self._group_by_scene(data_infos)
-        pred_by_idx = {r['sample_idx']: r for r in results}
 
         num_classes = len(self.class_names)
         thresholds = np.linspace(

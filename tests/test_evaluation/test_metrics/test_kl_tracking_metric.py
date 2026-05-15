@@ -3,9 +3,11 @@ import tempfile
 import pickle
 import numpy as np
 import pytest
+import torch
 
 from mmdet3d.evaluation.metrics.kl_tracking_metric import (
     KlTrackingMetric, _greedy_match)
+from mmdet3d.structures import LiDARInstance3DBoxes
 
 
 def _make_pkl(tmp_path, data_list):
@@ -187,3 +189,66 @@ class TestKlTrackingMetric:
 
         out = metric.compute_metrics(results)
         assert out['FRAG'] >= 1
+
+    def test_evaluate_predicted_samples_only(self, two_scene_data):
+        """Optionally ignore GT frames absent from dataloader predictions."""
+        ann_file, data_list = two_scene_data
+        results = []
+        for info in data_list[1:]:
+            instances = info['instances']
+            centers = np.array([inst['bbox_3d'][:3] for inst in instances],
+                              dtype=np.float32)
+            labels = np.array([inst['bbox_label_3d'] for inst in instances],
+                             dtype=np.int64)
+            track_ids = np.array([inst['track_id'] for inst in instances],
+                                dtype=np.int64)
+            results.append(dict(
+                sample_idx=info['sample_idx'],
+                pred_centers=centers,
+                pred_scores=np.ones(len(instances), dtype=np.float32),
+                pred_labels=labels,
+                pred_track_ids=track_ids,
+            ))
+
+        strict_metric = KlTrackingMetric(
+            ann_file=ann_file, match_threshold=2.0, num_thresholds=10)
+        filtered_metric = KlTrackingMetric(
+            ann_file=ann_file,
+            match_threshold=2.0,
+            num_thresholds=10,
+            evaluate_predicted_samples_only=True)
+
+        strict_out = strict_metric.compute_metrics(results)
+        filtered_out = filtered_metric.compute_metrics(results)
+        assert filtered_out['AMOTA'] > strict_out['AMOTA']
+
+    def test_process_uses_gravity_center_for_lidar_boxes(self, tmp_path):
+        """Track eval should match LiDAR boxes by gravity center, not bottom z."""
+        data_list = [dict(
+            sample_idx=0,
+            scene_token='scene_A',
+            timestamp=1000.0,
+            instances=[
+                dict(bbox_3d=[0, 0, 2, 2, 2, 4, 0],
+                     bbox_label_3d=1,
+                     track_id=1),
+            ])]
+        ann_file = _make_pkl(tmp_path, data_list)
+        metric = KlTrackingMetric(
+            ann_file=ann_file, match_threshold=1.0, num_thresholds=10)
+
+        pred = dict(
+            bboxes_3d=LiDARInstance3DBoxes(
+                torch.tensor([[0, 0, 2, 2, 2, 4, 0]], dtype=torch.float32),
+                box_dim=7,
+                origin=(0.5, 0.5, 0.5)),
+            scores_3d=torch.ones(1),
+            labels_3d=torch.ones(1, dtype=torch.long),
+            instance_id=torch.ones(1, dtype=torch.long))
+        metric.process({}, [
+            dict(sample_idx=0, pred_track_instances_3d=pred)
+        ])
+
+        assert metric.results[0]['pred_centers'][0, 2] == pytest.approx(2.0)
+        out = metric.compute_metrics(metric.results)
+        assert out['AMOTA'] > 0.5
