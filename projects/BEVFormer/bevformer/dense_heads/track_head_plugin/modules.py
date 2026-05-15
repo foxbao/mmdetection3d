@@ -1,15 +1,100 @@
-"""Query Interaction Module: between-frame self-update of active tracks.
+"""Track-query interaction modules.
 
-Stripped UniAD QIM: keeps the active-track self-attention update plus the
-MOTR-style train-time regularization (random drop + add false positives), and
-leaves out MemoryBank (Stage C) and the SDC ego-vehicle query (not relevant
-for port scenes).
+These are small, LiDAR-only ports of UniAD's track-query utilities. The base
+track config only uses ``QueryInteractionModule``; MemoryBank is exposed for a
+separate ablation config so existing runs are not affected.
 """
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from .track_instance import Instances
+
+
+class MemoryBank(nn.Module):
+    """Temporal memory over track-query embeddings.
+
+    This follows UniAD's MemoryBank: recent ``output_embedding`` vectors are
+    saved per track and attended before QIM updates the next-frame query.
+    """
+
+    def __init__(self, args, dim_in: int, hidden_dim: int, dim_out: int):
+        super().__init__()
+        self.save_thresh = args.get('memory_bank_score_thresh', 0.0)
+        self.save_period = args.get('memory_bank_save_period', 3)
+        self.max_his_length = args.get('memory_bank_len', 4)
+
+        self.save_proj = nn.Linear(dim_in, dim_in)
+        self.temporal_attn = nn.MultiheadAttention(dim_in, 8, dropout=0.0)
+        self.temporal_fc1 = nn.Linear(dim_in, hidden_dim)
+        self.temporal_fc2 = nn.Linear(hidden_dim, dim_in)
+        self.temporal_norm1 = nn.LayerNorm(dim_in)
+        self.temporal_norm2 = nn.LayerNorm(dim_in)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def _forward_temporal_attn(self, ti: Instances) -> Instances:
+        if len(ti) == 0:
+            return ti
+
+        key_padding_mask = ti.mem_padding_mask
+        valid = key_padding_mask[:, -1] == 0
+        embed = ti.output_embedding[valid]
+        if len(embed) == 0:
+            return ti
+
+        prev_embed = ti.mem_bank[valid]
+        key_padding_mask = key_padding_mask[valid]
+        embed2 = self.temporal_attn(
+            embed[None],
+            prev_embed.transpose(0, 1),
+            prev_embed.transpose(0, 1),
+            key_padding_mask=key_padding_mask)[0][0]
+        embed = self.temporal_norm1(embed + embed2)
+        embed2 = self.temporal_fc2(F.relu(self.temporal_fc1(embed)))
+        embed = self.temporal_norm2(embed + embed2)
+
+        ti.output_embedding = ti.output_embedding.clone()
+        ti.output_embedding[valid] = embed
+        return ti
+
+    def update(self, ti: Instances) -> None:
+        embed = ti.output_embedding[:, None]
+        scores = ti.scores
+        save_period = ti.save_period
+        mem_padding_mask = ti.mem_padding_mask
+        device = embed.device
+
+        if self.training:
+            saved = scores > 0
+        else:
+            saved = (save_period == 0) & (scores > self.save_thresh)
+            save_period[save_period > 0] -= 1
+            save_period[saved] = self.save_period
+
+        saved_embed = embed[saved]
+        if len(saved_embed) == 0:
+            return
+
+        prev_embed = ti.mem_bank[saved]
+        save_embed = self.save_proj(saved_embed)
+        mem_padding_mask[saved] = torch.cat([
+            mem_padding_mask[saved, 1:],
+            torch.zeros(
+                (len(saved_embed), 1), dtype=torch.bool, device=device)
+        ], dim=1)
+        ti.mem_bank = ti.mem_bank.clone()
+        ti.mem_bank[saved] = torch.cat([prev_embed[:, 1:], save_embed], dim=1)
+
+    def forward(self, ti: Instances, update_bank: bool = True) -> Instances:
+        ti = self._forward_temporal_attn(ti)
+        if update_bank:
+            self.update(ti)
+        return ti
 
 
 class QueryInteractionModule(nn.Module):

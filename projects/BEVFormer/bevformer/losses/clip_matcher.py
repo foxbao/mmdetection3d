@@ -1,9 +1,10 @@
 """MOTR-style clip matcher for the BEVDETR track head.
 
 This is a stripped UniAD ClipMatcher: no SDC query, no past_trajs, and
-delegates Hungarian matching to ``BEVDETRHungarianAssigner3D`` so pi-symmetric
-classes and the IoU cost we added in Stage A automatically flow into new-track
-association.
+delegates Hungarian matching to ``BEVDETRHungarianAssigner3D`` so KL-specific
+pi-symmetric orientation handling flows into new-track association. The matcher
+still supports optional IoU matching/loss for ablations, but the UniAD-aligned
+track config keeps tracking supervision to classification + L1 box loss.
 
 GT contract per frame (entry from ``Instances``-style bag built by the
 detector):
@@ -51,6 +52,9 @@ class BEVDETRClipMatcher(nn.Module):
         iou_calculator: dict = None,
         pc_range: Sequence[float] = None,
         pi_symmetric_class_indices: Sequence[int] = (),
+        debug_match: bool = False,
+        debug_match_interval: int = 1,
+        debug_match_max_steps: int = 50,
     ) -> None:
         super().__init__()
         if pc_range is None:
@@ -65,6 +69,10 @@ class BEVDETRClipMatcher(nn.Module):
         self.loss_iou = MODELS.build(loss_iou) if loss_iou else None
         self.iou_calculator = (TASK_UTILS.build(iou_calculator)
                                if iou_calculator else None)
+        self.debug_match = bool(debug_match)
+        self.debug_match_interval = max(int(debug_match_interval), 1)
+        self.debug_match_max_steps = int(debug_match_max_steps)
+        self._debug_match_step = 0
         self.register_buffer(
             'code_weights',
             torch.tensor(list(code_weights), dtype=torch.float32),
@@ -205,8 +213,51 @@ class BEVDETRClipMatcher(nn.Module):
                     union = area_p + area_g - inter
                     iou = inter / union.clamp(min=1e-6)
                     track_instances.iou[src_idx] = iou
+            self._maybe_log_debug_match(
+                dec_lvl=dec_lvl,
+                num_queries=len(track_instances),
+                num_gt=len(gt_track_ids),
+                inherited=int(prev_matched.size(0)),
+                untracked_gt=int(untracked_gt.numel()),
+                unmatched_queries=int(unmatched_track_idxes.numel()),
+                new_matched=int(new_matched.size(0)),
+                total_matched=int(matched_indices.size(0)),
+                active_after=int((track_instances.obj_idxes >= 0).sum()),
+                qim_active=int((track_instances.iou > 0.5).sum()))
             self.step()
         return track_instances, matched_indices
+
+    def _debug_should_log_match(self) -> bool:
+        if not self.debug_match:
+            return False
+        if self.debug_match_max_steps >= 0 and (
+                self._debug_match_step >= self.debug_match_max_steps):
+            return False
+        return self._debug_match_step % self.debug_match_interval == 0
+
+    def _maybe_log_debug_match(self, **stats) -> None:
+        if not self._debug_should_log_match():
+            self._debug_match_step += 1
+            return
+        try:
+            from mmengine.logging import MMLogger
+            logger = MMLogger.get_current_instance()
+            log = logger.info
+        except Exception:
+            log = print
+        log(
+            '[match-debug] '
+            f'step={self._debug_match_step} '
+            f'frame={self._current_frame_idx} dec={stats["dec_lvl"]} '
+            f'q={stats["num_queries"]} gt={stats["num_gt"]} '
+            f'inherited={stats["inherited"]} '
+            f'untracked_gt={stats["untracked_gt"]} '
+            f'unmatched_q={stats["unmatched_queries"]} '
+            f'new={stats["new_matched"]} '
+            f'total={stats["total_matched"]} '
+            f'active_after={stats["active_after"]} '
+            f'qim_iou>0.5={stats["qim_active"]}')
+        self._debug_match_step += 1
 
     # ------------------------------------------------------------------ #
     # Helpers
