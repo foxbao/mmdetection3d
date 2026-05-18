@@ -89,7 +89,7 @@ class _BEVFormerDetrDecoderLayer(BaseModule):
 
 
 @MODELS.register_module()
-class BEVFormerDETRHead(BaseModule):
+class BEVFormerTrackHead(BaseModule):
     """UniAD-aligned DETR head over BEVFormer-style BEV features.
 
     The detector supplies object queries and inverse-sigmoid reference points
@@ -143,7 +143,7 @@ class BEVFormerDETRHead(BaseModule):
                  num_query: Optional[int] = None) -> None:
         super().__init__(init_cfg=init_cfg)
         if pc_range is None:
-            raise ValueError('pc_range is required for BEVFormerDETRHead.')
+            raise ValueError('pc_range is required for BEVFormerTrackHead.')
 
         self.in_channels = int(in_channels)
         self.num_classes = num_classes
@@ -273,7 +273,7 @@ class BEVFormerDETRHead(BaseModule):
         expected_shape = (self.lidar_in_channels, self.bev_h, self.bev_w)
         if (channels, bev_h, bev_w) != expected_shape:
             raise ValueError('lidar_bev shape mismatch for '
-                             'BEVFormerDETRHead: expected '
+                            'BEVFormerTrackHead: expected '
                              f'(B, {expected_shape[0]}, {expected_shape[1]}, '
                              f'{expected_shape[2]}), got '
                              f'{tuple(lidar_bev.shape)}.')
@@ -282,7 +282,7 @@ class BEVFormerDETRHead(BaseModule):
                 batch_size, self.bev_embed_dims, self.bev_h, self.bev_w)
             if tuple(prev_bev.shape) != expected_prev_shape:
                 raise ValueError('prev_bev shape mismatch for '
-                                 'BEVFormerDETRHead: expected '
+                                'BEVFormerTrackHead: expected '
                                  f'{expected_prev_shape}, got '
                                  f'{tuple(prev_bev.shape)}.')
 
@@ -300,7 +300,7 @@ class BEVFormerDETRHead(BaseModule):
     @staticmethod
     def _unwrap_feats(feats) -> Tensor:
         if not isinstance(feats, (list, tuple)) or len(feats) != 1:
-            raise ValueError('BEVFormerDETRHead expects a single BEV feature '
+            raise ValueError('BEVFormerTrackHead expects a single BEV feature '
                              f'map, got {type(feats)} with len={len(feats)}.')
         return feats[0]
 
@@ -317,7 +317,7 @@ class BEVFormerDETRHead(BaseModule):
                 (inverse_sigmoid of normalized (cx, cy, cz)).
         """
         if object_query_embeds is None or ref_points is None:
-            raise ValueError('BEVFormerDETRHead.forward requires '
+            raise ValueError('BEVFormerTrackHead.forward requires '
                              'object_query_embeds and ref_points; the '
                              'detector owns these tensors.')
 

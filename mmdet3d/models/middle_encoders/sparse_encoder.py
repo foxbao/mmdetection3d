@@ -242,6 +242,99 @@ class SparseEncoder(nn.Module):
 
 
 @MODELS.register_module()
+class SparseEncoderXYZ(SparseEncoder):
+    r"""Sparse encoder for xyz-order voxel coordinates.
+
+    This variant matches BEVFusion-style voxelization, where sparse
+    coordinates are ordered as ``(batch_idx, x_idx, y_idx, z_idx)`` and
+    ``sparse_shape`` is ordered as ``[x_len, y_len, z_len]``. The dense sparse
+    tensor is therefore laid out as ``[N, C, X, Y, Z]``. The final z axis is
+    flattened into the channel dimension and the returned BEV feature layout is
+    ``[N, C * Z, X, Y]``.
+    """
+
+    def __init__(
+            self,
+            in_channels: int,
+            sparse_shape: List[int],
+            order: Optional[Tuple[str]] = ('conv', 'norm', 'act'),
+            norm_cfg: Optional[dict] = dict(
+                type='BN1d', eps=1e-3, momentum=0.01),
+            base_channels: Optional[int] = 16,
+            output_channels: Optional[int] = 128,
+            encoder_channels: Optional[TwoTupleIntType] = ((16, ), (32, 32,
+                                                                    32),
+                                                           (64, 64,
+                                                            64), (64, 64, 64)),
+            encoder_paddings: Optional[TwoTupleIntType] = ((1, ), (1, 1, 1),
+                                                           (1, 1, 1),
+                                                           ((0, 1, 1), 1, 1)),
+            block_type: Optional[str] = 'conv_module',
+            return_middle_feats: Optional[bool] = False):
+        super().__init__(
+            in_channels=in_channels,
+            sparse_shape=sparse_shape,
+            order=order,
+            norm_cfg=norm_cfg,
+            base_channels=base_channels,
+            output_channels=output_channels,
+            encoder_channels=encoder_channels,
+            encoder_paddings=encoder_paddings,
+            block_type=block_type,
+            return_middle_feats=return_middle_feats)
+        encoder_out_channels = self.encoder_channels[-1][-1]
+        self.conv_out = make_sparse_convmodule(
+            encoder_out_channels,
+            self.output_channels,
+            kernel_size=(1, 1, 3),
+            stride=(1, 1, 2),
+            norm_cfg=norm_cfg,
+            padding=0,
+            indice_key='spconv_down2',
+            conv_type='SparseConv3d')
+        self.fp16_enabled = False
+
+    @amp.autocast(enabled=False)
+    def forward(self, voxel_features: Tensor, coors: Tensor,
+                batch_size: int) -> Union[Tensor, Tuple[Tensor, list]]:
+        """Forward of SparseEncoderXYZ.
+
+        Args:
+            voxel_features (torch.Tensor): Voxel features in shape (N, C).
+            coors (torch.Tensor): Coordinates in shape (N, 4), ordered as
+                (batch_idx, x_idx, y_idx, z_idx).
+            batch_size (int): Batch size.
+
+        Returns:
+            torch.Tensor | tuple[torch.Tensor, list]: BEV features, optionally
+            with middle sparse features when ``return_middle_feats`` is True.
+        """
+        coors = coors.int()
+        input_sp_tensor = SparseConvTensor(voxel_features, coors,
+                                           self.sparse_shape, batch_size)
+        x = self.conv_input(input_sp_tensor)
+
+        encode_features = []
+        for encoder_layer in self.encoder_layers:
+            x = encoder_layer(x)
+            encode_features.append(x)
+
+        out = self.conv_out(encode_features[-1])
+        spatial_features = out.dense()
+
+        n, c, x_len, y_len, z_len = spatial_features.shape
+        spatial_features = spatial_features.permute(
+            0, 1, 4, 2, 3).contiguous()
+        spatial_features = spatial_features.view(
+            n, c * z_len, x_len, y_len)
+
+        if self.return_middle_feats:
+            return spatial_features, encode_features
+        else:
+            return spatial_features
+
+
+@MODELS.register_module()
 class SparseEncoderSASSD(SparseEncoder):
     r"""Sparse encoder for `SASSD <https://github.com/skyhehe123/SA-SSD>`_
 

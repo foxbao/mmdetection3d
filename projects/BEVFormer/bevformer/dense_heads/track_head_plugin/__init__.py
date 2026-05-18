@@ -1,7 +1,8 @@
-from .modules import MemoryBank, QueryInteractionModule
+from .modules import MemoryBank, QueryInteractionBase, QueryInteractionModule
 from .track_instance import Instances
 from .tracker import RuntimeTrackerBase
 
 __all__ = [
-    'Instances', 'MemoryBank', 'QueryInteractionModule', 'RuntimeTrackerBase'
+    'Instances', 'MemoryBank', 'QueryInteractionBase',
+    'QueryInteractionModule', 'RuntimeTrackerBase'
 ]

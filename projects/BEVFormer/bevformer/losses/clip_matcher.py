@@ -36,7 +36,7 @@ from ..dense_heads.track_head_plugin import Instances
 
 
 @MODELS.register_module()
-class BEVDETRClipMatcher(nn.Module):
+class ClipMatcher(nn.Module):
     """Clip-level MOTR matcher driving frame-by-frame track loss."""
 
     def __init__(
@@ -58,7 +58,7 @@ class BEVDETRClipMatcher(nn.Module):
     ) -> None:
         super().__init__()
         if pc_range is None:
-            raise ValueError('pc_range is required for BEVDETRClipMatcher.')
+            raise ValueError('pc_range is required for ClipMatcher.')
         self.num_classes = num_classes
         self.weight_dict = dict(weight_dict)
         self.pc_range = list(pc_range)

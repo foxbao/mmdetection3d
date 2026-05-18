@@ -1,3 +1,3 @@
-from .clip_matcher import BEVDETRClipMatcher
+from .clip_matcher import ClipMatcher
 
-__all__ = ['BEVDETRClipMatcher']
+__all__ = ['ClipMatcher']

@@ -3,7 +3,7 @@
 Extends ``BEVFormerLidar`` so a queue of frames is consumed as a single
 MOTR-style clip: query embeddings persist across frames, Hungarian matches
 only the unmatched queries against untracked GT, and per-frame losses are
-aggregated by ``BEVDETRClipMatcher``.
+aggregated by ``ClipMatcher``.
 
 The BEV extraction path (voxelization, sparse encoder, SECOND/FPN, temporal
 fusion) is inherited unchanged. What is rewritten here is:
@@ -111,6 +111,28 @@ class BEVFormerLidarTrack(BEVFormerLidar):
         ti.pred_logits = torch.zeros(N, self.num_classes, device=device)
         return ti
 
+    def _copy_tracks_for_loss(self, track_instances: Instances) -> Instances:
+        """Copy track identity state for auxiliary decoder-layer losses.
+
+        This mirrors UniAD's training flow: auxiliary decoder layers compute
+        their own matching/loss on a copy, while only the last decoder layer is
+        allowed to mutate the real ``track_instances`` carried to QIM and the
+        next frame. Otherwise early layers can promote/overwrite track ids
+        before the final predictions have decided the actual track state.
+        """
+        device = track_instances.obj_idxes.device
+        ti = Instances(track_instances.image_size)
+        ti.obj_idxes = copy.deepcopy(track_instances.obj_idxes)
+        ti.matched_gt_idxes = copy.deepcopy(track_instances.matched_gt_idxes)
+        ti.disappear_time = copy.deepcopy(track_instances.disappear_time)
+        ti.scores = torch.zeros(len(ti), device=device)
+        ti.iou = torch.zeros(len(ti), device=device)
+        ti.pred_boxes = torch.zeros(
+            len(ti), 10, dtype=torch.float, device=device)
+        ti.pred_logits = torch.zeros(
+            len(ti), self.num_classes, dtype=torch.float, device=device)
+        return ti
+
     # ------------------------------------------------------------------ #
     # Ego-motion warp of ref_pts between frames
     # ------------------------------------------------------------------ #
@@ -183,7 +205,15 @@ class BEVFormerLidarTrack(BEVFormerLidar):
 
     def loss(self, batch_inputs_dict: dict, batch_data_samples: List,
              **kwargs) -> dict:
-        """Run clip-level MOTR training. Assumes batch_size == 1."""
+        """Run clip-level MOTR training. Assumes batch_size == 1.
+
+        Following UniAD's memory strategy: every frame has gradients and
+        contributes to the loss (full per-layer supervision), but the
+        ``prev_bev`` handed to the next frame is detached so frame t's
+        autograd graph cannot extend back through frame t-1's BEV encoder.
+        This caps memory at roughly single-frame-encoder scale while keeping
+        MOTR-style per-frame supervision.
+        """
         assert len(batch_data_samples) == 1, (
             'BEVFormerLidarTrack currently requires batch_size=1.')
         sample = batch_data_samples[0]
@@ -201,56 +231,65 @@ class BEVFormerLidarTrack(BEVFormerLidar):
         prev_bev: Optional[Tensor] = None
 
         for t in range(T):
-            step_points = self._queue_points(
-                batch_inputs_dict, batch_data_samples, t, T)
-            current_bev = self._unwrap_single_bev(
-                self.extract_pts_bev_from_points(step_points,
-                                                 batch_data_samples))
-            if t > 0:
-                meta = queue_metas[t]
-                prev_bev = self._warp_prev_bev_if_needed(prev_bev, [meta])
-            fused_bev = self._fuse_bev(current_bev, prev_bev)
-
-            # Head forward with external queries (Stage A contract).
-            det_out = self.pts_bbox_head.get_detections(
-                self._wrap_single_bev(fused_bev),
-                object_query_embeds=track_instances.query,
-                ref_points=track_instances.ref_pts[None])  # [1, N, 3]
-            all_cls = det_out['all_cls_scores']     # [L, B=1, N, K]
-            all_box = det_out['all_bbox_preds']     # [L, B=1, N, 10]
-            query_feats = det_out['query_feats']    # [L, B=1, N, D]
-            L = all_cls.shape[0]
-
-            # Supervise every decoder layer on current frame.
-            for lyr in range(L):
-                # Stash per-layer predictions into track_instances before
-                # calling the matcher.
-                track_instances.pred_logits = all_cls[lyr, 0]
-                track_instances.pred_boxes = all_box[lyr, 0]
-                track_instances.scores = all_cls[lyr, 0].sigmoid().max(
-                    dim=-1).values.detach()
-                track_instances, _ = self.criterion.match_for_single_frame(
-                    {'track_instances': track_instances},
-                    dec_lvl=lyr,
-                    if_step=(lyr == L - 1))
-
-            # Carry output embedding from the last decoder layer forward.
-            track_instances.output_embedding = query_feats[-1, 0]
-            # Pick up the last (refined) reference points so the next-frame
-            # warp uses the head's iterative-refine output rather than the
-            # input ref.
-            last_ref = det_out['reference_points']
-            if last_ref.dim() == 3:  # [B, N, 3]
-                last_ref = last_ref[0]
-            track_instances.ref_pts = last_ref
-
-            # Advance for next frame: QIM + ego-motion warp of ref_pts.
+            fused_bev, track_instances = self._forward_frame(
+                batch_inputs_dict, batch_data_samples, queue_metas,
+                t, T, prev_bev, track_instances)
             if t < T - 1:
                 track_instances = self._advance_to_next_frame(
                     track_instances, queue_metas[t + 1], device)
-            prev_bev = fused_bev
+            # UniAD computes history BEV under no_grad. We keep the same
+            # boundary here by carrying only a detached BEV to the next frame:
+            # every frame is supervised, but frame t+1 cannot backprop through
+            # frame t's BEV encoder graph.
+            prev_bev = fused_bev.detach()
 
         return self.criterion.forward()
+
+    def _forward_frame(self, batch_inputs_dict, batch_data_samples,
+                       queue_metas, t: int, T: int,
+                       prev_bev: Optional[Tensor],
+                       track_instances: Instances):
+        """Run one clip step and append per-layer losses to the matcher."""
+        step_points = self._queue_points(
+            batch_inputs_dict, batch_data_samples, t, T)
+        current_bev = self._unwrap_single_bev(
+            self.extract_pts_bev_from_points(step_points, batch_data_samples))
+        if t > 0 and prev_bev is not None:
+            prev_bev = self._warp_prev_bev_if_needed(prev_bev, [queue_metas[t]])
+        fused_bev = self._fuse_bev(current_bev, prev_bev)
+
+        det_out = self.pts_bbox_head.get_detections(
+            self._wrap_single_bev(fused_bev),
+            object_query_embeds=track_instances.query,
+            ref_points=track_instances.ref_pts[None])
+        all_cls = det_out['all_cls_scores']
+        all_box = det_out['all_bbox_preds']
+        query_feats = det_out['query_feats']
+        L = all_cls.shape[0]
+
+        layer_track_instances = [
+            self._copy_tracks_for_loss(track_instances) for _ in range(L - 1)
+        ]
+        track_instances.output_embedding = query_feats[-1, 0]
+        last_ref = det_out['reference_points']
+        if last_ref.dim() == 3:
+            last_ref = last_ref[0]
+        track_instances.ref_pts = last_ref
+        layer_track_instances.append(track_instances)
+
+        for lyr, layer_ti in enumerate(layer_track_instances):
+            layer_ti.pred_logits = all_cls[lyr, 0]
+            layer_ti.pred_boxes = all_box[lyr, 0]
+            layer_ti.scores = all_cls[lyr, 0].sigmoid().max(
+                dim=-1).values.detach()
+            layer_ti, _ = self.criterion.match_for_single_frame(
+                {'track_instances': layer_ti},
+                dec_lvl=lyr,
+                if_step=(lyr == L - 1))
+            if lyr == L - 1:
+                track_instances = layer_ti
+
+        return fused_bev, track_instances
 
     def _advance_to_next_frame(self, ti: Instances, next_meta: dict,
                                device) -> Instances:
@@ -371,6 +410,9 @@ class BEVFormerLidarTrack(BEVFormerLidar):
             inst.labels_3d = active.obj_idxes.new_zeros(0, dtype=torch.long)
             inst.instance_id = active.obj_idxes.new_zeros(0, dtype=torch.long)
             data_sample.pred_instances_3d = inst
+            # Match Base3DDetector.add_pred_to_datasample's contract: 3D-only
+            # models still carry an empty 2D pred_instances for evaluators.
+            data_sample.pred_instances = InstanceData()
             return
         boxes = denormalize_bbox(active.pred_boxes)
         scores = active.pred_logits.sigmoid().max(dim=-1).values
@@ -396,3 +438,4 @@ class BEVFormerLidarTrack(BEVFormerLidar):
         inst.labels_3d = labels
         inst.instance_id = ids
         data_sample.pred_instances_3d = inst
+        data_sample.pred_instances = InstanceData()

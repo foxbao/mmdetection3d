@@ -97,16 +97,38 @@ class MemoryBank(nn.Module):
         return ti
 
 
-class QueryInteractionModule(nn.Module):
-    """Self-attention update over active track queries before next frame."""
+class QueryInteractionBase(nn.Module):
+    """UniAD-style base class for track-query interaction modules."""
 
     def __init__(self, args, dim_in: int, hidden_dim: int, dim_out: int):
         super().__init__()
+        self.args = args
+        self._build_layers(args, dim_in, hidden_dim, dim_out)
+        self._reset_parameters()
+
+    def _build_layers(self, args, dim_in, hidden_dim, dim_out):
+        raise NotImplementedError
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def _select_active_tracks(self, data: dict) -> Instances:
+        raise NotImplementedError
+
+    def _update_track_embedding(self, track_instances: Instances) -> Instances:
+        raise NotImplementedError
+
+
+class QueryInteractionModule(QueryInteractionBase):
+    """Self-attention update over active track queries before next frame."""
+
+    def __init__(self, args, dim_in: int, hidden_dim: int, dim_out: int):
+        super().__init__(args, dim_in, hidden_dim, dim_out)
         self.random_drop = args.get('random_drop', 0.1)
         self.fp_ratio = args.get('fp_ratio', 0.3)
         self.update_query_pos = args.get('update_query_pos', False)
-        self._build_layers(args, dim_in, hidden_dim, dim_out)
-        self._reset_parameters()
 
     def _build_layers(self, args, dim_in, hidden_dim, dim_out):
         dropout = args.get('merger_dropout', 0.0)
@@ -115,7 +137,7 @@ class QueryInteractionModule(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(hidden_dim, dim_in)
 
-        if self.update_query_pos:
+        if args.get('update_query_pos', False):
             self.linear_pos1 = nn.Linear(dim_in, hidden_dim)
             self.linear_pos2 = nn.Linear(hidden_dim, dim_in)
             self.dropout_pos1 = nn.Dropout(dropout)
@@ -133,11 +155,6 @@ class QueryInteractionModule(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.activation = F.relu
-
-    def _reset_parameters(self):
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
 
     def _update_track_embedding(self, ti: Instances) -> Instances:
         """Self-attention over active tracks; rewrites query[:, dim//2:]."""
@@ -199,8 +216,9 @@ class QueryInteractionModule(nn.Module):
             fp = inactive[top]
         return Instances.cat([ti_active, fp])
 
-    def _select_active_tracks(self, ti: Instances, training: bool) -> Instances:
-        if training:
+    def _select_active_tracks(self, data: dict) -> Instances:
+        ti: Instances = data['track_instances']
+        if self.training:
             active_idxes = (ti.obj_idxes >= 0) & (ti.iou > 0.5)
             active = ti[active_idxes]
             active = self._random_drop_tracks(active)
@@ -212,7 +230,7 @@ class QueryInteractionModule(nn.Module):
 
     def forward(self, data: dict) -> Instances:
         ti = data['track_instances']
-        active = self._select_active_tracks(ti, training=self.training)
+        active = self._select_active_tracks(data)
         active = self._update_track_embedding(active)
         init_ti: Instances = data['init_track_instances']
         return Instances.cat([init_ti, active])

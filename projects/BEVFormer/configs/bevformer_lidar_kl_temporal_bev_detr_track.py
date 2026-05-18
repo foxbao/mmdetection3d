@@ -4,7 +4,7 @@ Inherits the detection config so the head + temporal encoder + sparse stack
 stay identical. The differences are:
 
   * detector type: ``BEVFormerLidarTrack`` (clip-level loss + online inference)
-  * train loss adds a ``BEVDETRClipMatcher`` driving frame-by-frame matching;
+  * train loss adds a ``ClipMatcher`` driving frame-by-frame matching;
     detection-side losses on the current frame are still computed via the same
     head loss function inside the matcher (cls + L1) for a clean shared path.
   * batch_size = 1 (clip mode keeps gradients across all frames).
@@ -13,8 +13,8 @@ stay identical. The differences are:
     to be sync'd across the queue and conjugated through ``ego_motion_delta``
     to be safe; first version skips them. Pack3DDetInputs adds
     ``gt_track_ids_3d`` so every frame's gt_instances_3d carries track ids.
-  * load_from = epoch_7 of the detection run (best NDS as of writing). Track
-    fine-tune lr is 10x smaller than detection lr.
+  * load_from = epoch_12 of the detection run. Track fine-tune lr is 10x
+    smaller than detection lr.
 """
 _base_ = ['./bevformer_lidar_kl_temporal_bev_detr.py']
 
@@ -47,7 +47,7 @@ model = dict(
         merger_dropout=0.0,
         update_query_pos=False),
     track_loss_cfg=dict(
-        type='BEVDETRClipMatcher',
+        type='ClipMatcher',
         num_classes=num_classes,
         pc_range=point_cloud_range,
         pi_symmetric_class_indices=pi_symmetric_class_indices,
@@ -59,7 +59,7 @@ model = dict(
             cls_cost=dict(
                 type='mmdet.FocalLossCost', gamma=2.0, alpha=0.25, weight=2.0),
             reg_cost=dict(type='BEVDETRBBox3DL1Cost', weight=0.25),
-            iou_cost=dict(type='IoU3DCost', weight=0.25),
+            iou_cost=dict(type='BEVDETRIoU3DCost', weight=0.25),
             iou_calculator=dict(type='BboxOverlaps3D', coordinate='lidar'),
             pc_range=point_cloud_range,
             pi_symmetric_class_indices=pi_symmetric_class_indices),
@@ -132,8 +132,13 @@ param_scheduler = [
          by_epoch=True, begin=1, end=6, convert_to_iter_based=True),
 ]
 
-load_from = './work_dirs/bevformer_lidar_kl_temporal_bev_detr/epoch_10.pth'
+load_from = './work_dirs/bevformer_lidar_kl_temporal_bev_detr/epoch_12.pth'
 work_dir = './work_dirs/bevformer_lidar_kl_temporal_bev_detr_track'
+
+# QIM branches activate only when there are active tracks (iou > 0.5). On
+# frames/iterations without any carry-over, its params don't receive grad
+# and DDP would abort — enable find_unused_parameters for safety.
+find_unused_parameters = True
 
 # ---------------------------------------------------------------------- #
 # Evaluator: detection + tracking metrics.
@@ -153,6 +158,10 @@ val_evaluator = [
         type='KlTrackingMetric',
         ann_file=data_root + 'kl_infos_val.pkl',
         match_threshold=2.0,
-        num_thresholds=40),
+        num_thresholds=40,
+        # The BEVFormer queue dataset drops frames that cannot form a full
+        # temporal segment. Match detection eval and score tracking only on
+        # frames the model actually predicts, while keeping queue_length=3.
+        evaluate_predicted_samples_only=True),
 ]
 test_evaluator = val_evaluator

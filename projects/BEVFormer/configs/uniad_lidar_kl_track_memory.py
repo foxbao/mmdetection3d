@@ -1,12 +1,12 @@
 """MemoryBank ablation for the UniAD-like LiDAR BEV tracker."""
 
-_base_ = ['./bevformer_lidar_kl_uniad_track.py']
+_base_ = ['./uniad_lidar_kl_track.py']
 
 model = dict(
-    type='LidarUniADTrackMemory',
+    type='UniADTrackLiDARMemory',
     mem_args=dict(
         memory_bank_score_thresh=0.0,
         memory_bank_len=4,
         memory_bank_save_period=3))
 
-work_dir = './work_dirs/bevformer_lidar_kl_uniad_track_memory'
+work_dir = './work_dirs/uniad_lidar_kl_track_memory'

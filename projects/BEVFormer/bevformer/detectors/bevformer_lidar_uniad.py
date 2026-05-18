@@ -35,6 +35,10 @@ class BEVFormerLidarUniAD(MVXTwoStageDetector):
                  use_prev_bev: bool = True,
                  video_test_mode: bool = True,
                  eval_prev_bev_mode: str = 'auto',
+                 forecasting_head: Optional[dict] = None,
+                 train_bbox_head: bool = True,
+                 forecasting_detach_bev: bool = False,
+                 freeze_detector_for_forecasting: bool = False,
                  **kwargs) -> None:
         super().__init__(*args, **kwargs)
         valid_eval_modes = {'auto', 'online', 'history'}
@@ -48,11 +52,50 @@ class BEVFormerLidarUniAD(MVXTwoStageDetector):
         self.use_prev_bev = use_prev_bev
         self.video_test_mode = video_test_mode
         self.eval_prev_bev_mode = eval_prev_bev_mode
+        self.train_bbox_head = bool(train_bbox_head)
+        self.forecasting_detach_bev = bool(forecasting_detach_bev)
+        self.freeze_detector_for_forecasting = bool(
+            freeze_detector_for_forecasting)
+        self.forecasting_head = (MODELS.build(forecasting_head)
+                                 if forecasting_head is not None else None)
         self.query_embedding = nn.Embedding(num_query, embed_dims * 2)
         self.reference_points = nn.Linear(embed_dims, 3)
         self._test_prev_bev: Optional[Tensor] = None
         self._test_scene_token: Optional[str] = None
         self._init_detector_queries()
+        if self.freeze_detector_for_forecasting:
+            self._freeze_detector_modules()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and self.freeze_detector_for_forecasting:
+            for name in self._detector_module_names():
+                module = getattr(self, name, None)
+                if module is not None:
+                    module.eval()
+            if self.forecasting_head is not None:
+                self.forecasting_head.train(mode)
+        return self
+
+    @staticmethod
+    def _detector_module_names() -> Sequence[str]:
+        return (
+            'pts_voxel_encoder',
+            'pts_middle_encoder',
+            'pts_backbone',
+            'pts_neck',
+            'pts_bbox_head',
+            'query_embedding',
+            'reference_points',
+        )
+
+    def _freeze_detector_modules(self) -> None:
+        for name in self._detector_module_names():
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            for param in module.parameters():
+                param.requires_grad_(False)
 
     def extract_lidar_bev_from_points(self, points: List[Tensor],
                                       batch_data_samples) -> Tensor:
@@ -204,24 +247,38 @@ class BEVFormerLidarUniAD(MVXTwoStageDetector):
         return prev_bev
 
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs) -> dict:
-        lidar_bev = self.extract_lidar_bev_from_points(
-            batch_inputs_dict['points'], batch_data_samples)
-        prev_bev = self.obtain_history_bev(
-            batch_inputs_dict.get('history_points'), batch_data_samples)
-        current_meta = self.current_queue_meta(batch_data_samples)
-        prev_bev = self.valid_prev_bev(prev_bev, current_meta)
-        bev_embed = self.encode_bev(
-            lidar_bev, prev_bev, queue_meta=current_meta)
-        query_embeds, ref_points = self._detector_query_inputs(
-            bev_embed.size(0), bev_embed.device, bev_embed.dtype)
-        preds = self.pts_bbox_head.get_detections(
-            self._wrap_single_bev(bev_embed),
-            object_query_embeds=query_embeds,
-            ref_points=ref_points)
-        batch_gt_instances = [
-            sample.gt_instances_3d for sample in batch_data_samples
-        ]
-        return self.pts_bbox_head.loss_by_feat(preds, batch_gt_instances)
+        freeze_bev_graph = (
+            self.forecasting_head is not None and
+            self.forecasting_detach_bev and not self.train_bbox_head)
+        if freeze_bev_graph:
+            with torch.no_grad():
+                bev_embed, _ = self._extract_current_bev_embed(
+                    batch_inputs_dict, batch_data_samples)
+        else:
+            bev_embed, _ = self._extract_current_bev_embed(
+                batch_inputs_dict, batch_data_samples)
+
+        losses = {}
+        if self.train_bbox_head:
+            query_embeds, ref_points = self._detector_query_inputs(
+                bev_embed.size(0), bev_embed.device, bev_embed.dtype)
+            preds = self.pts_bbox_head.get_detections(
+                self._wrap_single_bev(bev_embed),
+                object_query_embeds=query_embeds,
+                ref_points=ref_points)
+            batch_gt_instances = [
+                sample.gt_instances_3d for sample in batch_data_samples
+            ]
+            losses.update(
+                self.pts_bbox_head.loss_by_feat(preds, batch_gt_instances))
+
+        if self.forecasting_head is not None:
+            forecasting_bev = (
+                bev_embed.detach() if self.forecasting_detach_bev else
+                bev_embed)
+            losses.update(
+                self._forecasting_loss(forecasting_bev, batch_data_samples))
+        return losses
 
     def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
         lidar_bev = self.extract_lidar_bev_from_points(
@@ -245,9 +302,67 @@ class BEVFormerLidarUniAD(MVXTwoStageDetector):
         for data_sample in batch_data_samples:
             if 'pred_pts_seg' not in data_sample:
                 data_sample.pred_pts_seg = PointData()
+        if self.forecasting_head is not None:
+            self._forecasting_predict(bev_embed, batch_data_samples)
         if self.video_test_mode and len(batch_data_samples) == 1:
             self._test_prev_bev = bev_embed.detach()
         return batch_data_samples
+
+    def _extract_current_bev_embed(self, batch_inputs_dict, batch_data_samples):
+        lidar_bev = self.extract_lidar_bev_from_points(
+            batch_inputs_dict['points'], batch_data_samples)
+        prev_bev = self.obtain_history_bev(
+            batch_inputs_dict.get('history_points'), batch_data_samples)
+        current_meta = self.current_queue_meta(batch_data_samples)
+        prev_bev = self.valid_prev_bev(prev_bev, current_meta)
+        bev_embed = self.encode_bev(
+            lidar_bev, prev_bev, queue_meta=current_meta)
+        return bev_embed, current_meta
+
+    @staticmethod
+    def _box_centers_and_state(boxes_3d, labels_3d):
+        centers = boxes_3d.gravity_center[:, :2]
+        num_boxes = boxes_3d.tensor.shape[0]
+        if boxes_3d.tensor.shape[1] >= 9:
+            velocities = boxes_3d.tensor[:, 7:9]
+        else:
+            velocities = boxes_3d.tensor.new_zeros(num_boxes, 2)
+        return centers, velocities, labels_3d
+
+    def _forecasting_loss(self, bev_feat: Tensor,
+                          batch_data_samples) -> dict:
+        centers_list, velocities_list, labels_list = [], [], []
+        gt_locs_list, gt_mask_list = [], []
+        for sample in batch_data_samples:
+            gt_instances = sample.gt_instances_3d
+            if not (hasattr(gt_instances, 'forecasting_locs')
+                    and hasattr(gt_instances, 'forecasting_mask')):
+                return {}
+            centers, velocities, labels = self._box_centers_and_state(
+                gt_instances.bboxes_3d, gt_instances.labels_3d)
+            centers_list.append(centers)
+            velocities_list.append(velocities)
+            labels_list.append(labels)
+            gt_locs_list.append(gt_instances.forecasting_locs)
+            gt_mask_list.append(gt_instances.forecasting_mask)
+        return self.forecasting_head.loss(
+            bev_feat, centers_list, velocities_list, labels_list,
+            gt_locs_list, gt_mask_list)
+
+    def _forecasting_predict(self, bev_feat: Tensor,
+                             batch_data_samples) -> None:
+        centers_list, velocities_list, labels_list = [], [], []
+        for sample in batch_data_samples:
+            pred_instances = sample.pred_instances_3d
+            centers, velocities, labels = self._box_centers_and_state(
+                pred_instances.bboxes_3d, pred_instances.labels_3d)
+            centers_list.append(centers)
+            velocities_list.append(velocities)
+            labels_list.append(labels)
+        forecasts = self.forecasting_head(
+            bev_feat, centers_list, velocities_list, labels_list)
+        for sample, forecast in zip(batch_data_samples, forecasts):
+            sample.pred_instances_3d.forecasting_3d = forecast
 
     def _predict_prev_bev(self, batch_inputs_dict, batch_data_samples,
                           current_meta: List[dict]) -> Optional[Tensor]:

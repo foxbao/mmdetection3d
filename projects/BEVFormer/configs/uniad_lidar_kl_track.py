@@ -29,13 +29,16 @@ point_cloud_range = [-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]
 pi_symmetric_class_indices = [2, 6, 14]
 
 model = dict(
-    type='LidarUniADTrack',
+    type='UniADTrackLiDAR',
     num_query=600,
     embed_dims=256,
     num_classes=num_classes,
     class_names=class_names,
+    freeze_lidar_backbone=True,
+    freeze_lidar_neck=False,
+    freeze_bev_encoder=False,
     pts_bbox_head=dict(
-        type='BEVFormerDETRHead'),
+        type='BEVFormerTrackHead'),
     score_thresh=0.7,
     filter_score_thresh=0.5,
     miss_tolerance=5,
@@ -46,7 +49,7 @@ model = dict(
         merger_dropout=0.0,
         update_query_pos=True),
     track_loss_cfg=dict(
-        type='BEVDETRClipMatcher',
+        type='ClipMatcher',
         num_classes=num_classes,
         pc_range=point_cloud_range,
         pi_symmetric_class_indices=pi_symmetric_class_indices,
@@ -117,7 +120,7 @@ param_scheduler = [
 ]
 
 load_from = './work_dirs/bevformer_lidar_kl_uniad_det/epoch_5.pth'
-work_dir = './work_dirs/bevformer_lidar_kl_uniad_track'
+work_dir = './work_dirs/uniad_lidar_kl_track'
 
 find_unused_parameters = True
 

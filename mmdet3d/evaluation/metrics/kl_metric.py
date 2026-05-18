@@ -826,6 +826,12 @@ class KlMetric(BaseMetric):
             for attr_name in pred_3d:
                 pred_3d[attr_name] = pred_3d[attr_name].to('cpu')
             result['pred_instances_3d'] = pred_3d
+            pred_track_3d = data_sample.get('pred_track_instances_3d')
+            if pred_track_3d is not None:
+                for attr_name in pred_track_3d:
+                    pred_track_3d[attr_name] = pred_track_3d[attr_name].to(
+                        'cpu')
+                result['pred_track_instances_3d'] = pred_track_3d
             for attr_name in pred_2d:
                 pred_2d[attr_name] = pred_2d[attr_name].to('cpu')
             result['pred_instances'] = pred_2d
@@ -983,6 +989,9 @@ class KlMetric(BaseMetric):
             gt_forecast_count += int(gt_has_forecast.sum())
 
             pred = result['pred_instances_3d']
+            track_pred = result.get('pred_track_instances_3d', None)
+            if 'forecasting_3d' not in pred and track_pred is not None:
+                pred = track_pred
             if 'forecasting_3d' not in pred:
                 continue
             has_forecasting_pred = True

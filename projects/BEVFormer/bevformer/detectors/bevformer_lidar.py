@@ -58,7 +58,7 @@ class BEVFormerLidar(MVXTwoStageDetector):
         """Align voxel coordinates with the sparse encoder's axis convention.
 
         Standard mmdet3d hard voxelization emits coordinates as ``[b, z, y, x]``.
-        BEVFusionSparseEncoder expects ``[b, x, y, z]`` because its project-local
+        SparseEncoderXYZ expects ``[b, x, y, z]`` because BEVFusion-style
         voxelization keeps the original xyz index order.
         """
         if self.voxel_coord_order == 'zyx':

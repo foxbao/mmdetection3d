@@ -1,6 +1,6 @@
 from .bev_detr_head import BEVDETRHead
-from .bev_detr_lidar_uniad_head import BEVFormerDETRHead
-from .bev_forecasting_head import BEVForecastingHead
+from .bev_detr_lidar_uniad_head import BEVFormerTrackHead
+from .bev_forecasting_head import BEVForecastingHead, TrackMotionHead
 from .bev_map_head import BEVMapHead
 from .bev_occ_head import BEVOccHead2D
 from .language_conditioned_forecasting_head import \
@@ -8,7 +8,8 @@ from .language_conditioned_forecasting_head import \
 from .transformer_forecasting_head import TransformerForecastingHead
 
 __all__ = [
-    'BEVDETRHead', 'BEVFormerDETRHead', 'BEVForecastingHead', 'BEVMapHead',
-    'BEVOccHead2D', 'LanguageConditionedForecastingHead',
+    'BEVDETRHead', 'BEVFormerTrackHead', 'BEVForecastingHead',
+    'TrackMotionHead', 'BEVMapHead', 'BEVOccHead2D',
+    'LanguageConditionedForecastingHead',
     'TransformerForecastingHead'
 ]

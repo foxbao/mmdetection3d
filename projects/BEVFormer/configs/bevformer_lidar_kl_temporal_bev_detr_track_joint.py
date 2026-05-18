@@ -1,7 +1,7 @@
 """Joint detection + tracking training from scratch (UniAD-style).
 
 Instead of the two-stage approach (train detection -> fine-tune tracking),
-this config trains both simultaneously. The BEVDETRClipMatcher provides
+this config trains both simultaneously. The ClipMatcher provides
 full detection supervision (cls + L1 + IoU on every decoder layer, every
 frame) so the detection head learns alongside the tracking components.
 
