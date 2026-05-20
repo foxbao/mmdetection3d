@@ -6,8 +6,8 @@ Two modes are supported:
    for voxel / spconv models such as BEVFormerLidar):
 
    python tools/visualize_kl_velocity.py \
-       --config projects/BEVFormer/configs/bevformer_lidar_kl_uniad_det.py \
-       --checkpoint work_dirs/bevformer_lidar_kl_uniad_det/epoch_5.pth \
+       --config projects/BEVFormer/configs/base_bevformer_lidar.py \
+       --checkpoint work_dirs/base_bevformer_lidar/epoch_5.pth \
        --out-dir work_dirs/vis_uniad_det_epoch5_velocity \
        --device cuda:0 --max-frames 20 --annotate
 

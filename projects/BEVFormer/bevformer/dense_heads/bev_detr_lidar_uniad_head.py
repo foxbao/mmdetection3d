@@ -9,7 +9,6 @@ sigmoid-space refine path for the legacy temporal configs.
 
 from __future__ import annotations
 
-import copy
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -20,85 +19,22 @@ from mmengine.model import BaseModule, bias_init_with_prob
 from mmengine.structures import InstanceData
 from torch import Tensor, nn
 
-from mmcv.ops import MultiScaleDeformableAttention
-
 from mmdet3d.registry import MODELS, TASK_UTILS
 
 from .bev_detr_head import denormalize_bbox, inverse_sigmoid, normalize_bbox
 from ..modules.lidar_bevformer_encoder import LearnedBEVPositionalEncoding
 
 
-class _BEVFormerDetrDecoderLayer(BaseModule):
-    """DETR decoder layer with deformable BEV cross-attention.
-
-    Identical structure to the layer used by ``BEVDETRHead`` (self-attn +
-    deformable cross-attn + FFN), kept local so this head has no inheritance
-    coupling.
-    """
-
-    def __init__(self,
-                 embed_dims: int = 256,
-                 num_heads: int = 8,
-                 num_points: int = 4,
-                 num_levels: int = 1,
-                 ffn_channels: int = 1024,
-                 dropout: float = 0.1) -> None:
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dims, num_heads, dropout)
-        self.cross_attn = MultiScaleDeformableAttention(
-            embed_dims=embed_dims,
-            num_heads=num_heads,
-            num_levels=num_levels,
-            num_points=num_points,
-            dropout=dropout,
-            batch_first=True)
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dims, ffn_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_channels, embed_dims),
-        )
-        self.norm1 = nn.LayerNorm(embed_dims)
-        self.norm2 = nn.LayerNorm(embed_dims)
-        self.norm3 = nn.LayerNorm(embed_dims)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-    def forward(self, query: Tensor, query_pos: Tensor, value: Tensor,
-                reference_points: Tensor, spatial_shapes: Tensor,
-                level_start_index: Tensor) -> Tensor:
-        q = k = query + query_pos
-        query2 = self.self_attn(q, k, value=query)[0]
-        query = self.norm1(query + self.dropout1(query2))
-
-        query_b = query.permute(1, 0, 2).contiguous()
-        query_pos_b = query_pos.permute(1, 0, 2).contiguous()
-        query_b = self.cross_attn(
-            query=query_b,
-            value=value,
-            query_pos=query_pos_b,
-            reference_points=reference_points,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index)
-        query = query_b.permute(1, 0, 2).contiguous()
-        query = self.norm2(query)
-
-        query2 = self.ffn(query)
-        query = self.norm3(query + self.dropout3(query2))
-        return query
-
-
 @MODELS.register_module()
-class BEVFormerTrackHead(BaseModule):
+class BEVFormerLiDARHead(BaseModule):
     """UniAD-aligned DETR head over BEVFormer-style BEV features.
 
     The detector supplies object queries and inverse-sigmoid reference points
     each call. The head owns:
       * the BEV query / positional encoding consumed by the BEV encoder, plus
         the LiDAR-feature projection;
-      * the ``transformer`` (UniAD's BEV encoder boundary);
-      * the deformable DETR decoder, cls/reg branches, losses, and
-        assignment + prediction utilities.
+      * the ``transformer`` with its BEV encoder and detection decoder;
+      * cls/reg branches, losses, and assignment + prediction utilities.
 
     Box refinement is done entirely in logit space — ``reference_points`` in
     the returned dict is logit-space, matching UniAD's ``last_ref_points``.
@@ -121,6 +57,10 @@ class BEVFormerTrackHead(BaseModule):
                  code_weights: Optional[Sequence[float]] = None,
                  pc_range: Optional[Sequence[float]] = None,
                  with_box_refine: bool = True,
+                 as_two_stage: bool = False,
+                 sync_cls_avg_factor: bool = True,
+                 bbox_coder: Optional[dict] = None,
+                 positional_encoding: Optional[dict] = None,
                  lidar_in_channels: Optional[int] = None,
                  bev_embed_dims: Optional[int] = None,
                  loss_cls: dict = dict(
@@ -142,22 +82,38 @@ class BEVFormerTrackHead(BaseModule):
                  # does not own queries, so num_query is informational only.
                  num_query: Optional[int] = None) -> None:
         super().__init__(init_cfg=init_cfg)
+        if as_two_stage:
+            raise ValueError('BEVFormerLiDARHead does not support '
+                             'as_two_stage=True.')
+        if bbox_coder is not None and pc_range is None:
+            pc_range = bbox_coder.get('pc_range', None)
         if pc_range is None:
-            raise ValueError('pc_range is required for BEVFormerTrackHead.')
+            raise ValueError('pc_range is required for BEVFormerLiDARHead.')
 
         self.in_channels = int(in_channels)
         self.num_classes = num_classes
         self.embed_dims = embed_dims
         self.num_decoder_layers = num_decoder_layers
-        self.num_points = num_points
         self.code_size = code_size
         self.pc_range = list(pc_range)
         self.with_box_refine = with_box_refine
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg or {}
+        if bbox_coder is not None:
+            self.test_cfg.setdefault('max_num', bbox_coder.get('max_num'))
+            self.test_cfg.setdefault(
+                'post_center_range', bbox_coder.get('post_center_range'))
+        self.test_cfg = {
+            key: value
+            for key, value in self.test_cfg.items()
+            if value is not None
+        }
         self.pi_symmetric_class_indices = list(
             (train_cfg or {}).get('pi_symmetric_class_indices', []) or [])
         self.num_query = num_query
+        self.as_two_stage = as_two_stage
+        self.sync_cls_avg_factor = sync_cls_avg_factor
+        self.bbox_coder_cfg = bbox_coder
         self.bev_h = bev_h
         self.bev_w = bev_w
         self.lidar_in_channels = int(lidar_in_channels or self.in_channels)
@@ -173,7 +129,7 @@ class BEVFormerTrackHead(BaseModule):
             torch.tensor(code_weights, dtype=torch.float32),
             persistent=False)
 
-        # ---- BEV encoder boundary (matches UniAD BEVFormerTrackHead) -------
+        # ---- BEV encoder boundary (matches UniAD BEVFormer head) ----------
         transformer = dict(transformer)
         configured_embed_dims = transformer.get('embed_dims')
         self.bev_embed_dims = int(bev_embed_dims or configured_embed_dims
@@ -196,41 +152,73 @@ class BEVFormerTrackHead(BaseModule):
                 self.lidar_in_channels, self.bev_embed_dims, kernel_size=1))
         self.bev_embedding = nn.Embedding(bev_h * bev_w,
                                           self.bev_embed_dims)
+        self._validate_positional_encoding(
+            positional_encoding, bev_h, bev_w, self.bev_embed_dims)
         self.positional_encoding = LearnedBEVPositionalEncoding(
             bev_h, bev_w, self.bev_embed_dims)
         transformer.setdefault('bev_h', bev_h)
         transformer.setdefault('bev_w', bev_w)
         transformer.setdefault('embed_dims', self.bev_embed_dims)
         self.transformer = MODELS.build(transformer)
+        if getattr(self.transformer, 'decoder', None) is None:
+            raise ValueError('transformer.decoder is required for '
+                             'BEVFormerLiDARHead.')
+        self.num_decoder_layers = self.transformer.decoder.num_layers
 
         # ---- DETR decoder over BEV memory ----------------------------------
         self.input_proj = nn.Conv2d(in_channels, embed_dims, kernel_size=1)
 
-        self.decoder_layers = nn.ModuleList([
-            _BEVFormerDetrDecoderLayer(
-                embed_dims=embed_dims, num_heads=num_heads,
-                num_points=num_points, num_levels=1,
-                ffn_channels=ffn_channels, dropout=dropout)
-            for _ in range(num_decoder_layers)
-        ])
         self.cls_branches = nn.ModuleList(
             [self._make_cls_branch(num_reg_fcs)
-             for _ in range(num_decoder_layers)])
+             for _ in range(self.num_decoder_layers)])
         self.reg_branches = nn.ModuleList(
             [self._make_reg_branch(num_reg_fcs)
-             for _ in range(num_decoder_layers)])
+             for _ in range(self.num_decoder_layers)])
 
         # ---- losses / assigner --------------------------------------------
         self.loss_cls = MODELS.build(loss_cls)
         self.loss_bbox = MODELS.build(loss_bbox)
         self.loss_iou = MODELS.build(loss_iou) if loss_iou else None
         self.bg_cls_weight = 0.0
-        self.sync_cls_avg_factor = True
 
         if train_cfg is not None:
             self.assigner = TASK_UTILS.build(train_cfg['assigner'])
         else:
             self.assigner = None
+
+    @staticmethod
+    def _validate_positional_encoding(positional_encoding: Optional[dict],
+                                      bev_h: int, bev_w: int,
+                                      embed_dims: int) -> None:
+        if positional_encoding is None:
+            return
+        cfg = dict(positional_encoding)
+        if cfg.get('type') != 'LearnedPositionalEncoding':
+            raise ValueError('BEVFormerLiDARHead only supports '
+                             'LearnedPositionalEncoding-style BEV position '
+                             f'config, got {cfg.get("type")}.')
+        expected = dict(
+            num_feats=embed_dims // 2,
+            row_num_embed=bev_h,
+            col_num_embed=bev_w)
+        for key, value in expected.items():
+            if cfg.get(key) != value:
+                raise ValueError(f'positional_encoding.{key} must be {value}, '
+                                 f'got {cfg.get(key)}.')
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        """Map old head-owned decoder checkpoints to transformer.decoder."""
+        old_prefix = prefix + 'decoder_layers.'
+        new_prefix = prefix + 'transformer.decoder.layers.'
+        for key in list(state_dict.keys()):
+            if key.startswith(old_prefix):
+                mapped = new_prefix + key[len(old_prefix):]
+                state_dict.setdefault(mapped, state_dict[key])
+                state_dict.pop(key)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys,
+            unexpected_keys, error_msgs)
 
     def _make_cls_branch(self, num_fcs: int) -> nn.Sequential:
         layers = []
@@ -273,7 +261,7 @@ class BEVFormerTrackHead(BaseModule):
         expected_shape = (self.lidar_in_channels, self.bev_h, self.bev_w)
         if (channels, bev_h, bev_w) != expected_shape:
             raise ValueError('lidar_bev shape mismatch for '
-                            'BEVFormerTrackHead: expected '
+                             'BEVFormerLiDARHead: expected '
                              f'(B, {expected_shape[0]}, {expected_shape[1]}, '
                              f'{expected_shape[2]}), got '
                              f'{tuple(lidar_bev.shape)}.')
@@ -282,7 +270,7 @@ class BEVFormerTrackHead(BaseModule):
                 batch_size, self.bev_embed_dims, self.bev_h, self.bev_w)
             if tuple(prev_bev.shape) != expected_prev_shape:
                 raise ValueError('prev_bev shape mismatch for '
-                                'BEVFormerTrackHead: expected '
+                                 'BEVFormerLiDARHead: expected '
                                  f'{expected_prev_shape}, got '
                                  f'{tuple(prev_bev.shape)}.')
 
@@ -300,7 +288,7 @@ class BEVFormerTrackHead(BaseModule):
     @staticmethod
     def _unwrap_feats(feats) -> Tensor:
         if not isinstance(feats, (list, tuple)) or len(feats) != 1:
-            raise ValueError('BEVFormerTrackHead expects a single BEV feature '
+            raise ValueError('BEVFormerLiDARHead expects a single BEV feature '
                              f'map, got {type(feats)} with len={len(feats)}.')
         return feats[0]
 
@@ -317,7 +305,7 @@ class BEVFormerTrackHead(BaseModule):
                 (inverse_sigmoid of normalized (cx, cy, cz)).
         """
         if object_query_embeds is None or ref_points is None:
-            raise ValueError('BEVFormerTrackHead.forward requires '
+            raise ValueError('BEVFormerLiDARHead.forward requires '
                              'object_query_embeds and ref_points; the '
                              'detector owns these tensors.')
 
@@ -326,35 +314,27 @@ class BEVFormerTrackHead(BaseModule):
 
         memory = self.input_proj(bev)
         memory = memory.flatten(2).transpose(1, 2).contiguous()
-        spatial_shapes = torch.as_tensor(
-            [[bev_h, bev_w]], dtype=torch.long, device=bev.device)
-        level_start_index = torch.as_tensor(
-            [0], dtype=torch.long, device=bev.device)
-
-        dim = object_query_embeds.shape[-1] // 2
-        query_pos_w = object_query_embeds[:, :dim]
-        query_feat_w = object_query_embeds[:, dim:]
-        query = query_feat_w[:, None, :].expand(-1, batch_size, -1)
-        query_pos = query_pos_w[:, None, :].expand(-1, batch_size, -1)
-
-        # ref_points is logit-space. Sampling uses sigmoid coords; refine adds
-        # reg delta directly in logit space and re-sigmoids for the next layer.
-        ref_logit = ref_points
-        reference = ref_logit.sigmoid()
+        inter_states, init_reference, inter_references = (
+            self.transformer.get_states_and_refs(
+                memory,
+                object_query_embeds,
+                bev_h,
+                bev_w,
+                reference_points=ref_points,
+                reg_branches=self.reg_branches
+                if self.with_box_refine else None))
+        hs = inter_states.permute(0, 2, 1, 3).contiguous()
 
         all_cls_scores = []
         all_bbox_preds = []
         query_feats = []
-        last_ref_points = ref_logit
-        for layer_id, layer in enumerate(self.decoder_layers):
-            # BEV memory is [B, C, H=Y, W=X]; MSDA's reference is
-            # (W_frac, H_frac) = (cx_norm, cy_norm) with no swap.
-            msda_ref = reference[..., :2].unsqueeze(2).contiguous()
-
-            query = layer(query, query_pos, memory, msda_ref,
-                          spatial_shapes, level_start_index)
-
-            query_b = query.permute(1, 0, 2).contiguous()
+        last_ref_points = ref_points
+        for layer_id in range(hs.shape[0]):
+            reference = (
+                init_reference if layer_id == 0 else
+                inter_references[layer_id - 1])
+            ref_logit = inverse_sigmoid(reference)
+            query_b = hs[layer_id]
             cls_score = self.cls_branches[layer_id](query_b)
             reg_raw = self.reg_branches[layer_id](query_b)
             bbox_pred = self._decode_regression(reg_raw, ref_logit)
@@ -367,15 +347,13 @@ class BEVFormerTrackHead(BaseModule):
             refined_xy = reg_raw[..., 0:2] + ref_logit[..., 0:2]
             refined_z = reg_raw[..., 4:5] + ref_logit[..., 2:3]
             last_ref_points = torch.cat([refined_xy, refined_z], dim=-1)
-            if self.with_box_refine and layer_id < len(self.decoder_layers) - 1:
-                ref_logit = last_ref_points.detach()
-                reference = ref_logit.sigmoid()
 
         return dict(
             all_cls_scores=torch.stack(all_cls_scores),
             all_bbox_preds=torch.stack(all_bbox_preds),
             query_feats=torch.stack(query_feats),
             reference_points=last_ref_points.detach(),
+            last_ref_points=last_ref_points.detach(),
         )
 
     def _decode_regression(self, raw: Tensor, reference_logit: Tensor) -> Tensor:

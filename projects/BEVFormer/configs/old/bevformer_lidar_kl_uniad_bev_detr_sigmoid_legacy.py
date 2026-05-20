@@ -26,7 +26,7 @@ model = dict(
     type='BEVFormerLidarUniAD',
     pts_neck=dict(out_channels=[128, 128]),
     pts_bbox_head=dict(
-        type='BEVFormerTrackHead',
+        type='BEVFormerLiDARHead',
         # Detector layout is [B, C, X, Y]; head BEV encoder receives
         # [B, C, Y, X], matching UniAD's query-first BEV transformer boundary.
         lidar_in_channels=256,

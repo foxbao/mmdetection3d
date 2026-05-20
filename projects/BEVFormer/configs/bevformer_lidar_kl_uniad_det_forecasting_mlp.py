@@ -7,7 +7,7 @@ already carries enough motion signal before wiring forecasting into the track
 query path.
 """
 
-_base_ = ['./bevformer_lidar_kl_uniad_det.py']
+_base_ = ['./base_bevformer_lidar.py']
 
 point_cloud_range = [-80.0, -48.0, -2.0, 80.0, 48.0, 6.0]
 class_names = [
@@ -82,5 +82,5 @@ param_scheduler = [
 val_evaluator = dict(metric=['bbox', 'forecasting'])
 test_evaluator = val_evaluator
 
-load_from = './work_dirs/bevformer_lidar_kl_uniad_det/epoch_5.pth'
-work_dir = './work_dirs/bevformer_lidar_kl_uniad_det_forecasting_mlp'
+load_from = './work_dirs/base_bevformer_lidar/epoch_5.pth'
+work_dir = './work_dirs/base_bevformer_lidar_forecasting_mlp'

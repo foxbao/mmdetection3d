@@ -1,7 +1,7 @@
 """LiDAR-only BEVFormer for the KL_8 dataset."""
 from .data_preprocessor import BEVFormerDataPreprocessor
 from .datasets import KlBEVFormerDataset, SceneSequentialSampler
-from .dense_heads import (BEVDETRHead, BEVFormerTrackHead, BEVForecastingHead,
+from .dense_heads import (BEVDETRHead, BEVFormerLiDARHead, BEVForecastingHead,
                           TrackMotionHead, BEVMapHead, BEVOccHead2D,
                           TransformerForecastingHead)
 from .detectors import BEVFormerLidar, BEVFormerLidarTrack
@@ -12,7 +12,7 @@ __all__ = [
     'BEVFormerDataPreprocessor', 'BEVFormerLidar', 'BEVFormerLidarTrack',
     'KlBEVFormerDataset', 'SceneSequentialSampler',
     'TemporalSelfAttention', 'BEVTemporalEncoder', 'BEVDETRHead',
-    'BEVFormerTrackHead', 'BEVForecastingHead', 'BEVMapHead', 'BEVOccHead2D',
+    'BEVFormerLiDARHead', 'BEVForecastingHead', 'BEVMapHead', 'BEVOccHead2D',
     'TrackMotionHead', 'TransformerForecastingHead', 'ClipMatcher',
     'warp_prev_bev'
 ]

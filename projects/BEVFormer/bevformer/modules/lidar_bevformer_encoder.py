@@ -142,8 +142,9 @@ class BEVFormerEncoder(BaseModule):
     """LiDAR BEV encoder layers with temporal and spatial attention.
 
     The learned BEV query and positional encoding live in the head, matching
-    UniAD's ``BEVFormerTrackHead.get_bev_features`` boundary. This module only
-    consumes those tensors and applies the BEVFormer-style encoder layers.
+    UniAD-style ``BEVFormerLiDARHead.get_bev_features`` boundary. This
+    module only consumes those tensors and applies the BEVFormer-style
+    encoder layers.
     """
 
     def __init__(self,

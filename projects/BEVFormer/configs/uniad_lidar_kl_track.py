@@ -1,6 +1,6 @@
 """Main track fine-tune config for the UniAD-like LiDAR BEV detector."""
 
-_base_ = ['./bevformer_lidar_kl_uniad_det.py']
+_base_ = ['./base_bevformer_lidar.py']
 
 custom_imports = dict(
     imports=[
@@ -38,7 +38,7 @@ model = dict(
     freeze_lidar_neck=False,
     freeze_bev_encoder=False,
     pts_bbox_head=dict(
-        type='BEVFormerTrackHead'),
+        type='BEVFormerLiDARHead'),
     score_thresh=0.7,
     filter_score_thresh=0.5,
     miss_tolerance=5,
@@ -119,7 +119,7 @@ param_scheduler = [
          by_epoch=True, begin=0, end=6, convert_to_iter_based=True),
 ]
 
-load_from = './work_dirs/bevformer_lidar_kl_uniad_det/epoch_5.pth'
+load_from = './work_dirs/base_bevformer_lidar/epoch_5.pth'
 work_dir = './work_dirs/uniad_lidar_kl_track'
 
 find_unused_parameters = True

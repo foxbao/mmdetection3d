@@ -1,10 +1,15 @@
-"""UniAD-aligned LiDAR BEVFormer experiment base.
+"""LiDAR counterpart of UniAD's base BEVFormer detector config.
 
-This base intentionally adopts the standard mmdet3d / UniAD axis convention:
+This is the current mainline detection-stage base for the LiDAR UniAD stack.
+It uses detector-owned object queries and logit-space reference points,
+matching UniAD's detection-query boundary more closely than the earlier
+sigmoid-reference ablation.
+
+The config intentionally adopts the standard mmdet3d / UniAD axis convention:
 voxel coordinates ``[b, z, y, x]`` and BEV feature layout ``[B, C, Y, X]``.
-The detector / head therefore carry no layout flags or swap steps. The
-older BEVFusion-style XYZ path lives in ``bevformer_lidar_kl_bev_detr_base.py``
-and remains unchanged for the legacy ``BEVDETRHead`` configs.
+The detector / head therefore carry no layout flags or swap steps. The older
+BEVFusion-style XYZ path lives in ``bevformer_lidar_kl_bev_detr_base.py`` and
+remains unchanged for the legacy ``BEVDETRHead`` configs.
 """
 
 _base_ = ['../../../configs/_base_/default_runtime.py']
@@ -12,6 +17,11 @@ _base_ = ['../../../configs/_base_/default_runtime.py']
 custom_imports = dict(
     imports=[
         'projects.BEVFormer.bevformer',
+        'projects.BEVFormer.bevformer.modules.lidar_bevformer_encoder',
+        'projects.BEVFormer.bevformer.modules.lidar_perception_transformer',
+        'projects.BEVFormer.bevformer.modules.lidar_spatial_cross_attention',
+        'projects.BEVFormer.bevformer.dense_heads.bev_detr_lidar_uniad_head',
+        'projects.BEVFormer.bevformer.detectors.bevformer_lidar_uniad',
         'projects.KL8',
     ],
     allow_failed_imports=False,
@@ -52,6 +62,10 @@ pi_symmetric_class_indices = [2, 6, 14]
 # ----------------------------------- model ----------------------------------
 
 model = dict(
+    type='BEVFormerLidarUniAD',
+    num_query=600,
+    embed_dims=256,
+    video_test_mode=True,
     data_preprocessor=dict(
         type='BEVFormerDataPreprocessor',
         voxel=True,
@@ -86,27 +100,82 @@ model = dict(
     pts_neck=dict(
         type='SECONDFPN',
         in_channels=[128, 256],
-        out_channels=[256, 256],
+        out_channels=[128, 128],
         upsample_strides=[1, 2],
         norm_cfg=dict(type='BN', eps=0.001, momentum=0.01),
         upsample_cfg=dict(type='deconv', bias=False),
         use_conv_for_no_stride=True),
     pts_bbox_head=dict(
-        type='BEVDETRHead',
-        in_channels=512,
+        type='BEVFormerLiDARHead',
+        # BEV memory throughout is [B, C, H=Y, W=X], matching UniAD's
+        # query-first BEV transformer boundary and standard mmdet3d axes.
+        lidar_in_channels=256,
+        in_channels=256,
         num_classes=num_classes,
         num_query=600,
+        sync_cls_avg_factor=True,
+        with_box_refine=True,
+        as_two_stage=False,
         embed_dims=256,
-        num_decoder_layers=6,
-        num_heads=8,
-        num_points=4,
-        ffn_channels=1024,
-        dropout=0.1,
         code_size=10,
         pc_range=point_cloud_range,
-        with_box_refine=True,
         code_weights=[1.0, 1.0, 1.0, 1.0, 1.0,
                       1.0, 1.0, 1.0, 0.2, 0.2],
+        bev_h=120,
+        bev_w=200,
+        bev_embed_dims=256,
+        transformer=dict(
+            type='PerceptionTransformer',
+            # UniAD-style temporal alignment lives in the transformer:
+            # rotate prev_bev for ego yaw and pass ego translation as shifted
+            # reference points to temporal self-attention.
+            point_cloud_range=point_cloud_range,
+            use_shift=True,
+            rotate_prev_bev=True,
+            encoder=dict(
+                type='BEVFormerEncoder',
+                num_layers=6,
+                num_heads=8,
+                temporal_num_points=4,
+                spatial_num_points=8,
+                ffn_channels=512,
+                dropout=0.1),
+            decoder=dict(
+                type='DetectionTransformerDecoder',
+                num_layers=6,
+                return_intermediate=True,
+                transformerlayers=dict(
+                    type='DetrTransformerDecoderLayer',
+                    attn_cfgs=[
+                        dict(
+                            type='MultiheadAttention',
+                            embed_dims=256,
+                            num_heads=8,
+                            dropout=0.1),
+                        dict(
+                            type='CustomMSDeformableAttention',
+                            embed_dims=256,
+                            num_levels=1,
+                            num_points=4),
+                    ],
+                    feedforward_channels=512,
+                    ffn_dropout=0.1,
+                    operation_order=('self_attn', 'norm', 'cross_attn',
+                                     'norm', 'ffn', 'norm')))),
+        bbox_coder=dict(
+            type='NMSFreeCoder',
+            post_center_range=[
+                -80.0, -48.0, -10.0, 80.0, 48.0, 10.0
+            ],
+            pc_range=point_cloud_range,
+            max_num=300,
+            voxel_size=voxel_size,
+            num_classes=num_classes),
+        positional_encoding=dict(
+            type='LearnedPositionalEncoding',
+            num_feats=128,
+            row_num_embed=120,
+            col_num_embed=200),
         loss_cls=dict(
             type='mmdet.FocalLoss',
             use_sigmoid=True,
@@ -128,12 +197,16 @@ model = dict(
                     gamma=2.0,
                     alpha=0.25,
                     weight=2.0),
+                # UniAD sets iou_cost weight=0.0 as a DETR-compatible fake
+                # cost. This assigner directly matches with cls + normalized
+                # 3D bbox L1, so the zero-weight IoU cost is intentionally
+                # omitted.
                 reg_cost=dict(type='BEVDETRBBox3DL1Cost', weight=0.25),
                 pc_range=point_cloud_range,
                 pi_symmetric_class_indices=pi_symmetric_class_indices))),
     test_cfg=dict(
         pts=dict(
-            max_num=500,
+            max_num=300,
             score_threshold=0.05,
             post_center_range=[
                 -80.0, -48.0, -10.0, 80.0, 48.0, 10.0
@@ -178,7 +251,7 @@ test_pipeline = [
 # ------------------------------- dataloaders -------------------------------
 
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -196,7 +269,7 @@ train_dataloader = dict(
         box_type_3d='LiDAR'))
 
 val_dataloader = dict(
-    batch_size=2,
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -215,7 +288,7 @@ val_dataloader = dict(
         backend_args=backend_args))
 
 test_dataloader = dict(
-    batch_size=2,
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
@@ -281,3 +354,5 @@ default_hooks = dict(
 
 log_processor = dict(window_size=50)
 auto_scale_lr = dict(enable=False, base_batch_size=32)
+
+work_dir = './work_dirs/base_bevformer_lidar'

@@ -14,7 +14,7 @@ with ``--with-full-warp`` when you want an extra implementation sanity check.
 
 Example:
     python tools/analysis_tools/visualize_uniad_bev_alignment.py \
-        --config projects/BEVFormer/configs/bevformer_lidar_kl_uniad_det.py \
+        --config projects/BEVFormer/configs/base_bevformer_lidar.py \
         --split val \
         --index 0 \
         --num-samples 6 \
