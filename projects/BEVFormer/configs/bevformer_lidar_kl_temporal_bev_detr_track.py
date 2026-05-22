@@ -83,7 +83,7 @@ model = dict(
 
 train_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR',
-         load_dim=5, use_dim=4, backend_args=None),
+         load_dim=4, use_dim=4, backend_args=None),
     dict(type='LoadAnnotations3D',
          with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),

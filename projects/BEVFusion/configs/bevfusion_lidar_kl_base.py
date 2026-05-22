@@ -61,7 +61,7 @@ model = dict(
             voxel_size=[0.1, 0.1, 0.2],
             max_voxels=[120000, 160000],
             voxelize_reduce=True)),
-    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=5),
+    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=4),
     pts_middle_encoder=dict(
         type='BEVFusionSparseEncoder',
         in_channels=4,
@@ -210,7 +210,7 @@ db_sampler = dict(
     points_loader=dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=[0, 1, 2, 3],
         backend_args=backend_args))
 
@@ -218,7 +218,7 @@ train_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
 
@@ -275,7 +275,7 @@ test_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     dict(

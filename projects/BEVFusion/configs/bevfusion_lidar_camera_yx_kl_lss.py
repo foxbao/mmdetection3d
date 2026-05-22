@@ -69,13 +69,13 @@ train_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     # dict(
     #     type='LoadPointsFromMultiSweeps',
     #     sweeps_num=9,
-    #     load_dim=5,
+    #     load_dim=4,
     #     use_dim=5,
     #     pad_empty_sweeps=True,
     #     remove_close=True,
@@ -145,13 +145,13 @@ test_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     # dict(
     #     type='LoadPointsFromMultiSweeps',
     #     sweeps_num=9,
-    #     load_dim=5,
+    #     load_dim=4,
     #     use_dim=5,
     #     pad_empty_sweeps=True,
     #     remove_close=True,

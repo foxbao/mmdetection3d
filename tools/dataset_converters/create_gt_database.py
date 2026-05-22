@@ -227,8 +227,8 @@ def create_groundtruth_database(dataset_class_name,
                 dict(
                     type='LoadPointsFromFile',
                     coord_type='LIDAR',
-                    load_dim=5,
-                    use_dim=5),
+                    load_dim=4,
+                    use_dim=4),
                 dict(
                     type='LoadAnnotations3D',
                     with_bbox_3d=True,

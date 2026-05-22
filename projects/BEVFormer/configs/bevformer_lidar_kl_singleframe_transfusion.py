@@ -188,7 +188,7 @@ train_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     dict(
@@ -218,7 +218,7 @@ test_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
