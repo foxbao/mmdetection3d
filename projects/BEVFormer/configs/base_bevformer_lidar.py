@@ -218,7 +218,7 @@ train_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     dict(
@@ -239,7 +239,7 @@ test_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=5,
+        load_dim=4,
         use_dim=4,
         backend_args=backend_args),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
@@ -251,7 +251,7 @@ test_pipeline = [
 # ------------------------------- dataloaders -------------------------------
 
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=4,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
@@ -321,30 +321,30 @@ test_evaluator = val_evaluator
 # ---------------------------- training schedule ----------------------------
 
 lr = 2e-4
+max_epochs = 12
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=lr, weight_decay=0.01),
     clip_grad=dict(max_norm=35, norm_type=2))
 
-train_cfg = dict(by_epoch=True, max_epochs=12, val_interval=1)
+train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
 val_cfg = dict()
 test_cfg = dict()
 
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=0.1,
-        by_epoch=True,
+        start_factor=1.0 / 3,
+        by_epoch=False,
         begin=0,
-        end=1,
-        convert_to_iter_based=True),
+        end=500),
     dict(
         type='CosineAnnealingLR',
-        T_max=11,
+        T_max=max_epochs,
         eta_min_ratio=1e-3,
         by_epoch=True,
-        begin=1,
-        end=12,
+        begin=0,
+        end=max_epochs,
         convert_to_iter_based=True),
 ]
 
