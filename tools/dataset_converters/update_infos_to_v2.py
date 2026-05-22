@@ -479,7 +479,7 @@ def update_kl_infos(pkl_path, out_dir):
         if 'sync_info' in ori_info_dict:
             temp_data_info['sync_info'] = ori_info_dict['sync_info']
         temp_data_info['lidar_points']['num_pts_feats'] = ori_info_dict.get(
-            'num_features', 5)
+            'num_features', 4)
         temp_data_info['lidar_points']['lidar_path'] = Path(
             ori_info_dict['lidar_path']).name
         temp_data_info['lidar_points'][

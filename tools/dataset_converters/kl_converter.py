@@ -86,16 +86,9 @@ def read_pcd_with_intensity(pcd_path):
     # ... 前面读取 data 的代码不变 ...validate_img_box
     data = np.fromfile(pcd_path, dtype=dtype, offset=data_offset)
 
-    # 定义我们想要的字段
+    # Keep generated samples compact: x, y, z, intensity.
     required_fields = ['x', 'y', 'z', 'intensity']
     arrs = [data[f].astype(np.float32) for f in required_fields]
-
-    # 检查 timestamp_2us 是否存在
-    if 'timestamp_2us' in data.dtype.names:
-        arrs.append(data['timestamp_2us'].astype(np.float32))
-    else:
-        # 如果不存在，手动创建一个全 0 列，长度与 data 一致
-        arrs.append(np.zeros(data.shape[0], dtype=np.float32))
 
     all_data = np.vstack(arrs).T
     valid_mask = ~np.isnan(all_data).any(axis=1)
@@ -109,7 +102,12 @@ def read_pc(pc_file):
         dtype = np.dtype([('x',np.float32),('y',np.float32),('z',np.float32),
                           ('intensity',np.float32),('ring',np.float32),('timestamp_2us',np.float32)])
         data = np.fromfile(pc_file,dtype=dtype)
-        points = np.vstack([data['x'],data['y'],data['z'],data['intensity']]).T
+        points = np.vstack([
+            data['x'],
+            data['y'],
+            data['z'],
+            data['intensity'],
+        ]).T
     elif pc_file.suffix=='.pcd':
         points = read_pcd_with_intensity(pc_file)
     else:
@@ -118,6 +116,13 @@ def read_pc(pc_file):
     points = points[valid_mask]
     points = points[np.max(np.abs(points[:,:3]),axis=1)<1e3]
     return points
+
+def is_valid_merged_lidar_bin(lidar_path, num_features=4):
+    lidar_path = Path(lidar_path)
+    if not lidar_path.exists():
+        return False
+    size = lidar_path.stat().st_size
+    return size > 0 and size % (np.dtype(np.float32).itemsize * num_features) == 0
 
 # ------------------- 坐标变换 -------------------
 def get_transform_matrix(quat_list):
@@ -241,7 +246,7 @@ def merge_lidar_points(frame_info, frame_id, merged_file):
         (True, sync_info)  -> 成功（或者文件已存在）
         (False, sync_info) -> 失败（时间对不上 / 文件缺失）
     """
-    should_write = not merged_file.exists()
+    should_write = not is_valid_merged_lidar_bin(merged_file, num_features=4)
     merged_points = []
     lidar_sync = {}
 
@@ -477,7 +482,7 @@ def recompute_num_lidar_pts(
 
     Args:
         gt_boxes (np.ndarray): (M, 7) [x,y,z,dx,dy,dz,yaw]
-        lidar_path (str or Path): merged lidar bin (5-dim float32)
+        lidar_path (str or Path): merged lidar bin (4-dim float32)
         device (str): 'cuda', 'cpu', or 'numpy'
         origin (tuple): box origin for LiDARInstance3DBoxes (torch backend only)
     Returns:
@@ -488,11 +493,11 @@ def recompute_num_lidar_pts(
         return np.zeros((0,), dtype=np.int32)
 
     # ---------- load points ----------
-    # merged bin is 5-dim (x,y,z,intensity,timestamp_2us) from read_pcd_with_intensity()
+    # merged bin is 4-dim (x,y,z,intensity) from read_pcd_with_intensity()
     try:
-        points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)
+        points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
     except ValueError:
-        print(f'[WARNING] cannot reshape lidar file (size not divisible by 5): {lidar_path}')
+        print(f'[WARNING] cannot reshape lidar file (size not divisible by 4): {lidar_path}')
         return np.zeros((M,), dtype=np.int32)
     points_xyz = points[:, :3]
 
@@ -669,30 +674,35 @@ def process_frame(frame_info):
     # ===== 读取 ego pose（从 localization JSON）=====
     ego2global_translation = [0.0, 0.0, 0.0]
     ego2global_rotation    = [1.0, 0.0, 0.0, 0.0]  # w,x,y,z
-    loc_dir = frame_info.get('localization_dir')
     loc_offset = get_sensor_time_offset(frame_info, 'localization')
-    if loc_dir is not None and Path(loc_dir).is_dir():
-        loc_files = list(Path(loc_dir).glob('*.json'))
+    loc_ts = frame_info.get('localization_sorted_ts')
+    loc_files = frame_info.get('localization_files')
+    if loc_ts is None or loc_files is None:
+        loc_dir = frame_info.get('localization_dir')
+        loc_files = []
+        if loc_dir is not None and Path(loc_dir).is_dir():
+            loc_files = list(Path(loc_dir).glob('*.json'))
         if loc_files:
             loc_ts = np.array([float(p.stem) for p in loc_files])
             idx_sort = np.argsort(loc_ts)
             loc_ts = loc_ts[idx_sort]
             loc_files = [loc_files[i] for i in idx_sort]
-            nearest_idx, nearest_ts, _, corrected_dt = match_nearest_timestamp(
-                loc_ts, frame_id, loc_offset)
-            loc_path = loc_files[nearest_idx]
-            loc_valid = abs(corrected_dt) < frame_info['localization_max_diff']
-            sync_info['localization'] = make_sync_entry(
-                nearest_ts, frame_id, loc_offset, loc_path, valid=loc_valid,
-                reason='' if loc_valid else
-                'localization timestamp exceeds max diff')
-            if loc_valid:
-                with open(loc_path, 'r') as f:
-                    loc = json.load(f)
-                pos = loc['position']
-                ori = loc['orientation']
-                ego2global_translation = [pos['x'], pos['y'], pos['z']]
-                ego2global_rotation    = [ori['w'], ori['x'], ori['y'], ori['z']]
+    if loc_ts is not None and len(loc_ts) > 0:
+        nearest_idx, nearest_ts, _, corrected_dt = match_nearest_timestamp(
+            loc_ts, frame_id, loc_offset)
+        loc_path = loc_files[nearest_idx]
+        loc_valid = abs(corrected_dt) < frame_info['localization_max_diff']
+        sync_info['localization'] = make_sync_entry(
+            nearest_ts, frame_id, loc_offset, loc_path, valid=loc_valid,
+            reason='' if loc_valid else
+            'localization timestamp exceeds max diff')
+        if loc_valid:
+            with open(loc_path, 'r') as f:
+                loc = json.load(f)
+            pos = loc['position']
+            ori = loc['orientation']
+            ego2global_translation = [pos['x'], pos['y'], pos['z']]
+            ego2global_rotation    = [ori['w'], ori['x'], ori['y'], ori['z']]
 
     if (frame_info.get('require_valid_localization', False)
             and not sync_info['localization'].get('valid', False)):
@@ -701,8 +711,8 @@ def process_frame(frame_info):
     # =================== 基础 info ===================
     info = {
         'lidar_path': None,   # 先占位，后面补
-        # Merged KL bins are saved as x, y, z, intensity, timestamp_2us.
-        'num_features': 5,
+        # Merged KL bins are saved as x, y, z, intensity.
+        'num_features': 4,
         'token': generate_token(),
         'sweeps': [],
         'cams': {},
@@ -859,7 +869,7 @@ def summarize_sync_infos(infos, out_path):
 # ------------------- 主函数 -------------------
 def generate_frame_bin_parallel(data_root, info_prefix, version,
                                 target_lidar_frame: str = 'FLU',
-                                max_diff=0.05, cfg=None):
+                                max_diff=0.05, cfg=None, workers=None):
     assert target_lidar_frame in ('RFU', 'FLU'), (
         f"target_lidar_frame must be 'RFU' or 'FLU', got {target_lidar_frame!r}")
     coord_transform = (target_lidar_frame == 'RFU')
@@ -872,9 +882,14 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
     if cfg is not None and 'gt_annotation_filter' in cfg:
         gt_annotation_filter = cfg.gt_annotation_filter
 
-    img_scale = 1.0 / 3.0
+    camera_processing_cfg = {}
+    if cfg is not None and hasattr(cfg, 'camera_processing_cfg'):
+        camera_processing_cfg = dict(cfg.camera_processing_cfg)
+    camera_processing_enabled = bool(camera_processing_cfg.get('enable', True))
+
+    img_scale = float(camera_processing_cfg.get('img_scale', 1.0 / 3.0))
     if cfg is not None and hasattr(cfg, 'img_scale'):
-        img_scale = cfg.img_scale
+        img_scale = float(camera_processing_cfg.get('img_scale', cfg.img_scale))
 
     legacy_sync_cfg = {}
     if cfg is not None and hasattr(cfg, 'sync_cfg'):
@@ -939,8 +954,12 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
         
         # ---------- 读取标定 ----------
         extrinsics = load_json_if_exists(extrinsics_path)
-        camera_extrinsics = load_json_if_exists(camera_extrinsics_path)
-        camera_intrinsics = load_json_if_exists(intrinsics_path)
+        camera_extrinsics = (
+            load_json_if_exists(camera_extrinsics_path)
+            if camera_processing_enabled else {})
+        camera_intrinsics = (
+            load_json_if_exists(intrinsics_path)
+            if camera_processing_enabled else {})
         
         # ---------- lidar 外参 ----------
         used_lidars = []
@@ -1001,7 +1020,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
         if cfg is not None and hasattr(cfg, 'camera_selection'):
             camera_selection = cfg.camera_selection
 
-        if camera_selection and camera_selection.get('enable', False):
+        if (camera_processing_enabled and camera_selection
+                and camera_selection.get('enable', False)):
             selected = set(camera_selection.get('use_cameras', []))
 
             # 只保留 selection 中的 camera
@@ -1080,8 +1100,21 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
         save_path = out_sample_path
         save_path.mkdir(parents=True, exist_ok=True)
 
-        # ---------- frame info ----------
+        # ---------- localization 文件索引 ----------
         localization_dir = scene_path / 'localization'
+        localization_files = []
+        localization_sorted_ts = np.array([], dtype=np.float64)
+        if localization_dir.is_dir():
+            localization_files = list(localization_dir.glob('*.json'))
+            if localization_files:
+                loc_ts = np.array(
+                    [float(p.stem) for p in localization_files],
+                    dtype=np.float64)
+                idx_sort = np.argsort(loc_ts)
+                localization_sorted_ts = loc_ts[idx_sort]
+                localization_files = [localization_files[i] for i in idx_sort]
+
+        # ---------- frame info ----------
         scene_token = f"{scene_path.parent.name}/{scene_path.name}"
         for label_file in label_files:
             frame_info_list.append({
@@ -1113,6 +1146,8 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
                 'gt_annotation_filter': gt_annotation_filter,
                 'img_scale': img_scale,
                 'localization_dir': localization_dir,
+                'localization_files': localization_files,
+                'localization_sorted_ts': localization_sorted_ts,
                 'scene_token': scene_token,
             })
 
@@ -1122,13 +1157,29 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
           f'lidar_dirs={len(lidar_dirs)}, '
           f'skip_no_label={skip_no_label}, skip_no_extrinsics={skip_no_extrinsics}')
 
-    num_workers = min(32, os.cpu_count())
-    # all_infos = []
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # chunksize 设置为 10-20 比较合适
-        results = list(tqdm(executor.map(process_frame, frame_info_list, chunksize=20), 
-                            total=len(frame_info_list), 
-                            desc="Processing frames"))
+    worker_cfg = {}
+    if cfg is not None and hasattr(cfg, 'worker_cfg'):
+        worker_cfg = dict(cfg.worker_cfg)
+    configured_workers = workers
+    if configured_workers is None:
+        configured_workers = worker_cfg.get(
+            'num_workers', min(32, os.cpu_count() or 1))
+    num_workers = max(1, int(configured_workers))
+    print(f'[KL] processing frames with num_workers={num_workers}, '
+          f'camera_processing={camera_processing_enabled}')
+
+    if num_workers == 1:
+        results = [
+            process_frame(frame_info)
+            for frame_info in tqdm(frame_info_list, desc="Processing frames")
+        ]
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # chunksize 设置为 10-20 比较合适
+            results = list(tqdm(executor.map(
+                process_frame, frame_info_list, chunksize=20),
+                total=len(frame_info_list),
+                desc="Processing frames"))
     
     base_infos = [res for res in results if res]
     print(f"[Stage 1] cam+lidar process, valid frames: {len(base_infos)}")
@@ -1222,8 +1273,10 @@ def generate_frame_bin_parallel(data_root, info_prefix, version,
     return train_results, val_results
 
 
-def create_kl_infos(data_root, info_prefix, version='v1.0-trainval', cfg=None):
-    generate_frame_bin_parallel(data_root, info_prefix, version, cfg=cfg)
+def create_kl_infos(data_root, info_prefix, version='v1.0-trainval', cfg=None,
+                    workers=None):
+    generate_frame_bin_parallel(
+        data_root, info_prefix, version, cfg=cfg, workers=workers)
 
 
 # ------------------- 脚本入口 -------------------

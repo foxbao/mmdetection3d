@@ -41,8 +41,27 @@ camera_selection = dict(
     ])
 
 
+# LiDAR-only generation does not need to decode, undistort, resize, or write
+# camera_undist images. Turn this on for camera or LiDAR-camera experiments.
+camera_processing_cfg = dict(
+    enable=False,
+    img_scale=1.0 / 3.0)
+
+
+# BEVFormer/UniAD LiDAR configs do not use ObjectSample, so the GT database is
+# skipped by default.
+gt_database_cfg = dict(
+    enable=False)
+
+
+# Only used by tools/dataset_converters/kl_converter.py when create_data.py does
+# not pass --workers. The CLI --workers value takes precedence.
+worker_cfg = dict(
+    num_workers=8)
+
+
 # Sensor-level soft-sync settings for tools/create_data.py --cfg
-# projects/KL8/configs/data_prep.py
+# projects/KL8/configs/kl8_lidar_bevformer.py
 sensor_sync_cfg = dict(
     lidar_max_diff=0.05,
     camera_max_diff=0.05,

@@ -94,7 +94,8 @@ def kl_data_prep(root_path,
                        version,
                        dataset_name,
                        out_dir,
-                       cfg=None):
+                       cfg=None,
+                       workers=4):
     """Prepare data related to kl dataset.
 
     Related data consists of '.pkl' files recording basic infos,
@@ -108,7 +109,7 @@ def kl_data_prep(root_path,
         out_dir (str): Output directory of the groundtruth database info.
     """
     kl_converter.create_kl_infos(
-        root_path, info_prefix, version=version, cfg=cfg)
+        root_path, info_prefix, version=version, cfg=cfg, workers=workers)
 
 
     info_train_path = osp.join(out_dir, f'{info_prefix}_infos_train.pkl')
@@ -160,8 +161,16 @@ def kl_data_prep(root_path,
         print('[KL] velocity_cfg.enable=False, skip per-instance velocity '
               'estimation; instance["velocity"] stays as [0.0, 0.0]')
 
-    create_groundtruth_database(dataset_name, root_path, info_prefix,
-                                f'{info_prefix}_infos_train.pkl')
+    gt_database_cfg = {}
+    if cfg is not None and hasattr(cfg, 'gt_database_cfg'):
+        gt_database_cfg = dict(cfg.gt_database_cfg)
+    gt_database_enabled = bool(gt_database_cfg.get('enable', True))
+    if gt_database_enabled:
+        create_groundtruth_database(dataset_name, root_path, info_prefix,
+                                    f'{info_prefix}_infos_train.pkl')
+    else:
+        print('[KL] gt_database_cfg.enable=False, skip ground-truth '
+              'database generation')
 
 def lyft_data_prep(root_path, info_prefix, version, max_sweeps=10):
     """Prepare data related to Lyft dataset.
@@ -375,7 +384,7 @@ parser.add_argument(
     '--only-gt-database',
     action='store_true',
     help='''Whether to only generate ground truth database.
-        Only used when dataset is NuScenes or Waymo!''')
+        Used when dataset is NuScenes, Waymo, or KL.''')
 parser.add_argument(
     '--skip-cam_instances-infos',
     action='store_true',
@@ -465,19 +474,20 @@ if __name__ == '__main__':
             save_senor_data=not args.skip_saving_sensor_data,
             skip_cam_instances_infos=args.skip_cam_instances_infos)
     elif args.dataset == 'kl':
-        # if args.only_gt_database:
-        #     create_groundtruth_database('KlDataset', args.root_path,
-        #                                 args.extra_tag,
-        #                                 f'{args.extra_tag}_infos_train.pkl')
-        # else:
-        train_version = f'{args.version}'
-        kl_data_prep(
-            root_path=args.root_path,
-            info_prefix=args.extra_tag,
-            version=train_version,
-            dataset_name='KlDataset',
-            out_dir=args.out_dir,
-            cfg=cfg)
+        if args.only_gt_database:
+            create_groundtruth_database('KlDataset', args.root_path,
+                                        args.extra_tag,
+                                        f'{args.extra_tag}_infos_train.pkl')
+        else:
+            train_version = f'{args.version}'
+            kl_data_prep(
+                root_path=args.root_path,
+                info_prefix=args.extra_tag,
+                version=train_version,
+                dataset_name='KlDataset',
+                out_dir=args.out_dir,
+                cfg=cfg,
+                workers=args.workers)
     elif args.dataset == 'lyft':
         train_version = f'{args.version}-train'
         lyft_data_prep(
