@@ -5,7 +5,7 @@ consumes the final ``outs_track`` state. The motion branch is detached from
 the shared track graph, so it does not backprop into detection or tracking.
 """
 
-_base_ = ['./uniad_lidar_kl_track.py']
+_base_ = ['./base_track_map_lidar.py']
 
 data_root = 'data/kl_8/'
 train_batch_size = 1
@@ -75,7 +75,7 @@ custom_imports = dict(
 )
 
 work_dir = './work_dirs/uniad_lidar_kl_track_motion_mlp'
-load_from = './work_dirs/uniad_lidar_kl_track/epoch_5.pth'
+load_from = './work_dirs/base_track_map_lidar/epoch_5.pth'
 
 val_evaluator = [
     dict(

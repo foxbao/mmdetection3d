@@ -1,6 +1,6 @@
 """MemoryBank ablation for the UniAD-like LiDAR BEV tracker."""
 
-_base_ = ['./uniad_lidar_kl_track.py']
+_base_ = ['./base_track_map_lidar.py']
 
 model = dict(
     type='UniADTrackLiDARMemory',

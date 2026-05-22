@@ -3,8 +3,8 @@
 
 Example:
     CUDA_VISIBLE_DEVICES=6 python tools/visualize_kl_track.py \
-        --config projects/BEVFormer/configs/uniad_lidar_kl_track.py \
-        --checkpoint work_dirs/uniad_lidar_kl_track/epoch_4.pth \
+        --config projects/BEVFormer/configs/base_track_map_lidar.py \
+        --checkpoint work_dirs/base_track_map_lidar/epoch_4.pth \
         --out-dir work_dirs/vis_track_epoch4_scene0 \
         --start-index 0 --max-frames 24 \
         --score-thr 0.0 --annotate

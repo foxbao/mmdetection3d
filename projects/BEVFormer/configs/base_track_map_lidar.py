@@ -1,4 +1,9 @@
-"""Main track fine-tune config for the UniAD-like LiDAR BEV detector."""
+"""LiDAR counterpart of UniAD's base track/map stage config.
+
+This config keeps the current tracking-only implementation, without map heads
+yet. The filename follows UniAD's ``base_track_map_lidar.py`` convention so
+future track/map comparisons have a stable anchor.
+"""
 
 _base_ = ['./base_bevformer_lidar.py']
 
@@ -75,7 +80,7 @@ model = dict(
 
 train_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR',
-         load_dim=5, use_dim=4, backend_args=None),
+         load_dim=4, use_dim=4, backend_args=None),
     dict(type='LoadAnnotations3D',
          with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
@@ -111,16 +116,25 @@ optim_wrapper = dict(
 
 train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=1)
 
-# UniAD-style: 500-iter linear warmup @ 1/3, then cosine to min_lr_ratio=1e-3.
 param_scheduler = [
-    dict(type='LinearLR', start_factor=1.0 / 3, by_epoch=False,
-         begin=0, end=500),
-    dict(type='CosineAnnealingLR', T_max=6, eta_min_ratio=1e-3,
-         by_epoch=True, begin=0, end=6, convert_to_iter_based=True),
+    dict(
+        type='LinearLR',
+        start_factor=1.0 / 3,
+        by_epoch=False,
+        begin=0,
+        end=500),
+    dict(
+        type='CosineAnnealingLR',
+        T_max=6,
+        eta_min_ratio=1e-3,
+        by_epoch=True,
+        begin=0,
+        end=6,
+        convert_to_iter_based=True),
 ]
 
-load_from = './work_dirs/base_bevformer_lidar/epoch_5.pth'
-work_dir = './work_dirs/uniad_lidar_kl_track'
+load_from = './work_dirs/base_bevformer_lidar/epoch_6.pth'
+work_dir = './work_dirs/base_track_map_lidar'
 
 find_unused_parameters = True
 
