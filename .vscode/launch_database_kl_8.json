@@ -12,7 +12,8 @@
         "--out-dir", "./data/kl_8",
         "--extra-tag", "kl",
         "--version", "v1.0-trainval",
-        "--cfg", "projects/KL8/configs/data_prep.py"
+        "--workers", "8",
+        "--cfg", "projects/KL8/configs/kl8_lidar_bevformer.py"
       ],
       "console": "integratedTerminal",
       "justMyCode": false
